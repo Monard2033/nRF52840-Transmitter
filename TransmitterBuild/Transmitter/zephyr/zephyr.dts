@@ -3,42 +3,42 @@
 / {
 	#address-cells = < 0x1 >;
 	#size-cells = < 0x1 >;
-	model = "Nordic nRF52840 DK NRF52840";
-	compatible = "nordic,nrf52840-dk-nrf52840";
+	model = "Nordic nRF52840 Dongle NRF52840";
+	compatible = "nordic,nrf52840-dongle-nrf52840";
 	chosen {
 		zephyr,bt-hci = &bt_hci_sdc;
-		zephyr,entropy = &cryptocell;
+		zephyr,entropy = &rng;
 		zephyr,flash-controller = &flash_controller;
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,code-partition = &slot0_partition;
-		zephyr,console = &uart0;
-		zephyr,shell-uart = &uart0;
-		zephyr,uart-mcumgr = &uart0;
-		zephyr,bt-mon-uart = &uart0;
-		zephyr,bt-c2h-uart = &uart0;
 		zephyr,ieee802154 = &ieee802154;
+		zephyr,console = &board_cdc_acm_uart;
+		zephyr,shell-uart = &board_cdc_acm_uart;
+		zephyr,uart-mcumgr = &board_cdc_acm_uart;
+		zephyr,bt-mon-uart = &board_cdc_acm_uart;
+		zephyr,bt-c2h-uart = &board_cdc_acm_uart;
+		zephyr,code-partition = &code_partition;
+		battery = &vbatt;
 	};
 	aliases {
-		led0 = &led0;
-		led1 = &led1;
-		led2 = &led2;
-		led3 = &led3;
-		pwm-led0 = &pwm_led0;
 		sw0 = &button0;
-		sw1 = &button1;
-		sw2 = &button2;
-		sw3 = &button3;
-		bootloader-led0 = &led0;
+		led0 = &led0_green;
+		led1 = &led1_red;
+		led2 = &led1_green;
+		led3 = &led1_blue;
+		led0-green = &led0_green;
+		led1-red = &led1_red;
+		led1-green = &led1_green;
+		led1-blue = &led1_blue;
+		pwm-led0 = &red_pwm_led;
+		pwm-led1 = &green_pwm_led;
+		pwm-led2 = &blue_pwm_led;
+		red-pwm-led = &red_pwm_led;
+		green-pwm-led = &green_pwm_led;
+		blue-pwm-led = &blue_pwm_led;
 		mcuboot-button0 = &button0;
-		mcuboot-led0 = &led0;
+		mcuboot-led0 = &led0_green;
 		watchdog0 = &wdt0;
-		datapluspin = &datapluspin;
-		dataminuspin = &dataminuspin;
-		spdtswitchpin = &spdtswitchpin;
-		ledred = &ledred;
-		ledgreen = &ledgreen;
-		ledblue = &ledblue;
 	};
 	soc {
 		#address-cells = < 0x1 >;
@@ -70,6 +70,7 @@
 			compatible = "nordic,nrf-uicr";
 			reg = < 0x10001000 0x1000 >;
 			status = "okay";
+			nfct-pins-as-gpios;
 			gpio-as-nreset;
 		};
 		sram0: memory@20000000 {
@@ -127,7 +128,7 @@
 			tx-high-power-supported;
 			ieee802154: ieee802154 {
 				compatible = "nordic,nrf-ieee802154";
-				status = "okay";
+				status = "disabled";
 			};
 			bt_hci_sdc: bt_hci_sdc {
 				compatible = "nordic,bt-hci-sdc";
@@ -142,13 +143,13 @@
 			compatible = "nordic,nrf-uarte";
 			reg = < 0x40002000 0x1000 >;
 			interrupts = < 0x2 0x1 >;
-			status = "okay";
+			status = "disabled";
 			current-speed = < 0x1c200 >;
 			pinctrl-0 = < &uart0_default >;
 			pinctrl-1 = < &uart0_sleep >;
 			pinctrl-names = "default", "sleep";
 		};
-		i2c0: arduino_i2c: i2c@40003000 {
+		i2c0: i2c@40003000 {
 			compatible = "nordic,nrf-twi";
 			#address-cells = < 0x1 >;
 			#size-cells = < 0x0 >;
@@ -212,7 +213,7 @@
 			interrupts = < 0x6 0x5 >;
 			status = "okay";
 			instance = < 0x0 >;
-			phandle = < 0x17 >;
+			phandle = < 0x11 >;
 		};
 		adc: adc@40007000 {
 			compatible = "nordic,nrf-saadc";
@@ -221,7 +222,18 @@
 			status = "okay";
 			#io-channel-cells = < 0x1 >;
 			zephyr,pm-device-runtime-auto;
-			phandle = < 0x1c >;
+			#address-cells = < 0x1 >;
+			#size-cells = < 0x0 >;
+			phandle = < 0x15 >;
+			channel@0 {
+				reg = < 0x0 >;
+				zephyr,gain = "ADC_GAIN_1_6";
+				zephyr,reference = "ADC_REF_VDD_1_4";
+				zephyr,acquisition-time = < 0x0 >;
+				zephyr,resolution = < 0xa >;
+				zephyr,oversampling = < 0x0 >;
+				zephyr,input-positive = < 0x0 >;
+			};
 		};
 		timer0: timer@40008000 {
 			compatible = "nordic,nrf-timer";
@@ -240,7 +252,7 @@
 			max-bit-width = < 0x20 >;
 			interrupts = < 0x9 0x1 >;
 			prescaler = < 0x0 >;
-			phandle = < 0x18 >;
+			phandle = < 0x12 >;
 		};
 		timer2: timer@4000a000 {
 			compatible = "nordic,nrf-timer";
@@ -375,7 +387,7 @@
 			pinctrl-0 = < &pwm0_default >;
 			pinctrl-1 = < &pwm0_sleep >;
 			pinctrl-names = "default", "sleep";
-			phandle = < 0x1b >;
+			phandle = < 0x14 >;
 		};
 		pdm0: pdm@4001d000 {
 			compatible = "nordic,nrf-pdm";
@@ -403,21 +415,17 @@
 					compatible = "fixed-partitions";
 					#address-cells = < 0x1 >;
 					#size-cells = < 0x1 >;
-					boot_partition: partition@0 {
-						label = "mcuboot";
-						reg = < 0x0 0xc000 >;
+					sd_partition: partition@0 {
+						reg = < 0x0 0x26000 >;
 					};
-					slot0_partition: partition@c000 {
-						label = "image-0";
-						reg = < 0xc000 0x77000 >;
+					code_partition: partition@26000 {
+						reg = < 0x26000 0xc6000 >;
 					};
-					slot1_partition: partition@83000 {
-						label = "image-1";
-						reg = < 0x83000 0x75000 >;
+					storage_partition: partition@ec000 {
+						reg = < 0xec000 0x8000 >;
 					};
-					storage_partition: partition@f8000 {
-						label = "storage";
-						reg = < 0xf8000 0x8000 >;
+					boot_partition: partition@f4000 {
+						reg = < 0xf4000 0xc000 >;
 					};
 				};
 			};
@@ -447,7 +455,7 @@
 			#pwm-cells = < 0x3 >;
 		};
 		spi2: spi@40023000 {
-			compatible = "nordic,nrf-spi";
+			compatible = "nordic,nrf-spim";
 			#address-cells = < 0x1 >;
 			#size-cells = < 0x0 >;
 			reg = < 0x40023000 0x1000 >;
@@ -455,9 +463,6 @@
 			max-frequency = < 0x7a1200 >;
 			easydma-maxcnt-bits = < 0x10 >;
 			status = "disabled";
-			pinctrl-0 = < &spi2_default >;
-			pinctrl-1 = < &spi2_sleep >;
-			pinctrl-names = "default", "sleep";
 		};
 		rtc2: rtc@40024000 {
 			compatible = "nordic,nrf-rtc";
@@ -486,16 +491,15 @@
 			num-isoin-endpoints = < 0x1 >;
 			num-isoout-endpoints = < 0x1 >;
 			status = "okay";
+			board_cdc_acm_uart: board_cdc_acm_uart {
+				compatible = "zephyr,cdc-acm-uart";
+			};
 		};
-		uart1: arduino_serial: uart@40028000 {
+		uart1: uart@40028000 {
 			compatible = "nordic,nrf-uarte";
 			reg = < 0x40028000 0x1000 >;
 			interrupts = < 0x28 0x1 >;
 			status = "disabled";
-			current-speed = < 0x1c200 >;
-			pinctrl-0 = < &uart1_default >;
-			pinctrl-1 = < &uart1_sleep >;
-			pinctrl-names = "default", "sleep";
 		};
 		qspi: qspi@40029000 {
 			compatible = "nordic,nrf-qspi";
@@ -504,23 +508,7 @@
 			reg = < 0x40029000 0x1000 >, < 0x12000000 0x8000000 >;
 			reg-names = "qspi", "qspi_mm";
 			interrupts = < 0x29 0x1 >;
-			status = "okay";
-			pinctrl-0 = < &qspi_default >;
-			pinctrl-1 = < &qspi_sleep >;
-			pinctrl-names = "default", "sleep";
-			mx25r64: mx25r6435f@0 {
-				compatible = "nordic,qspi-nor";
-				reg = < 0x0 >;
-				writeoc = "pp4io";
-				readoc = "read4io";
-				sck-frequency = < 0x7a1200 >;
-				jedec-id = [ C2 28 17 ];
-				sfdp-bfp = [ E5 20 F1 FF FF FF FF 03 44 EB 08 6B 08 3B 04 BB EE FF FF FF FF FF 00 FF FF FF 00 FF 0C 20 0F 52 10 D8 00 FF 23 72 F5 00 82 ED 04 CC 44 83 68 44 30 B0 30 B0 F7 C4 D5 5C 00 BE 29 FF F0 D0 FF FF ];
-				size = < 0x4000000 >;
-				has-dpd;
-				t-enter-dpd = < 0x2710 >;
-				t-exit-dpd = < 0x88b8 >;
-			};
+			status = "disabled";
 		};
 		pwm3: pwm@4002d000 {
 			compatible = "nordic,nrf-pwm";
@@ -529,7 +517,7 @@
 			status = "disabled";
 			#pwm-cells = < 0x3 >;
 		};
-		spi3: arduino_spi: spi@4002f000 {
+		spi3: spi@4002f000 {
 			compatible = "nordic,nrf-spim";
 			#address-cells = < 0x1 >;
 			#size-cells = < 0x0 >;
@@ -540,10 +528,12 @@
 			rx-delay-supported;
 			rx-delay = < 0x2 >;
 			status = "okay";
-			cs-gpios = < &arduino_header 0x10 0x1 >;
 			pinctrl-0 = < &spi3_default >;
 			pinctrl-1 = < &spi3_sleep >;
 			pinctrl-names = "default", "sleep";
+			wakeup-source;
+			cs-gpios = < &gpio0 0x8 0x1 >;
+			wake-gpios = < &gpio0 0x6 0x0 >;
 		};
 		gpio0: gpio@50000000 {
 			compatible = "nordic,nrf-gpio";
@@ -553,9 +543,7 @@
 			status = "okay";
 			port = < 0x0 >;
 			gpiote-instance = < &gpiote >;
-			gpio-reserved-ranges = < 0x0 0x2 >, < 0x6 0x1 >, < 0x8 0x3 >, < 0x11 0x7 >;
-			gpio-line-names = "XL1", "XL2", "AREF", "A0", "A1", "RTS", "TXD", "CTS", "RXD", "NFC1", "NFC2", "BUTTON1", "BUTTON2", "LED1", "LED2", "LED3", "LED4", "QSPI CS", "RESET", "QSPI CLK", "QSPI DIO0", "QSPI DIO1", "QSPI DIO2", "QSPI DIO3", "BUTTON3", "BUTTON4", "SDA", "SCL", "A2", "A3", "A4", "A5";
-			phandle = < 0x19 >;
+			phandle = < 0x10 >;
 		};
 		gpio1: gpio@50000300 {
 			compatible = "nordic,nrf-gpio";
@@ -566,8 +554,7 @@
 			status = "okay";
 			port = < 0x1 >;
 			gpiote-instance = < &gpiote >;
-			gpio-line-names = "", "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "", "D8", "D9", "D10", "D11", "D12", "D13";
-			phandle = < 0x1a >;
+			phandle = < 0x13 >;
 		};
 		cryptocell: crypto@5002a000 {
 			compatible = "nordic,cryptocell", "arm,cryptocell-310";
@@ -582,34 +569,17 @@
 		uart0_default: uart0_default {
 			phandle = < 0x2 >;
 			group1 {
-				psels = < 0x6 >, < 0x2000005 >;
+				psels = < 0x14 >, < 0x2000011 >;
 			};
 			group2 {
-				psels = < 0x1000008 >, < 0x3000007 >;
+				psels = < 0x1000018 >, < 0x3000016 >;
 				bias-pull-up;
 			};
 		};
 		uart0_sleep: uart0_sleep {
 			phandle = < 0x3 >;
 			group1 {
-				psels = < 0x6 >, < 0x1000008 >, < 0x2000005 >, < 0x3000007 >;
-				low-power-enable;
-			};
-		};
-		uart1_default: uart1_default {
-			phandle = < 0x10 >;
-			group1 {
-				psels = < 0x1000021 >;
-				bias-pull-up;
-			};
-			group2 {
-				psels = < 0x22 >;
-			};
-		};
-		uart1_sleep: uart1_sleep {
-			phandle = < 0x11 >;
-			group1 {
-				psels = < 0x1000021 >, < 0x22 >;
+				psels = < 0x14 >, < 0x1000018 >, < 0x2000011 >, < 0x3000016 >;
 				low-power-enable;
 			};
 		};
@@ -642,85 +612,53 @@
 		pwm0_default: pwm0_default {
 			phandle = < 0xc >;
 			group1 {
-				psels = < 0x1600000d >;
+				psels = < 0x16000018 >, < 0x17000020 >, < 0x1800000b >;
 				nordic,invert;
 			};
 		};
 		pwm0_sleep: pwm0_sleep {
 			phandle = < 0xd >;
 			group1 {
-				psels = < 0x1600000d >;
+				psels = < 0x16000018 >, < 0x17000020 >, < 0x1800000b >;
 				low-power-enable;
 			};
 		};
 		spi0_default: spi0_default {
 			phandle = < 0x6 >;
 			group1 {
-				psels = < 0x400001b >, < 0x500001a >, < 0x600001d >;
+				psels = < 0x400001b >, < 0x500001a >, < 0x600002a >;
 			};
 		};
 		spi0_sleep: spi0_sleep {
 			phandle = < 0x7 >;
 			group1 {
-				psels = < 0x400001b >, < 0x500001a >, < 0x600001d >;
+				psels = < 0x400001b >, < 0x500001a >, < 0x600002a >;
 				low-power-enable;
 			};
 		};
 		spi1_default: spi1_default {
 			phandle = < 0xa >;
 			group1 {
-				psels = < 0x400001f >, < 0x500001e >, < 0x6000028 >;
+				psels = < 0x400001f >, < 0x500001e >, < 0x600002d >;
 			};
 		};
 		spi1_sleep: spi1_sleep {
 			phandle = < 0xb >;
 			group1 {
-				psels = < 0x400001f >, < 0x500001e >, < 0x6000028 >;
+				psels = < 0x400001f >, < 0x500001e >, < 0x600002d >;
 				low-power-enable;
-			};
-		};
-		spi2_default: spi2_default {
-			phandle = < 0xe >;
-			group1 {
-				psels = < 0x4000013 >, < 0x5000014 >, < 0x6000015 >;
-			};
-		};
-		spi2_sleep: spi2_sleep {
-			phandle = < 0xf >;
-			group1 {
-				psels = < 0x4000013 >, < 0x5000014 >, < 0x6000015 >;
-				low-power-enable;
-			};
-		};
-		qspi_default: qspi_default {
-			phandle = < 0x12 >;
-			group1 {
-				psels = < 0x1d000013 >, < 0x1f000014 >, < 0x20000015 >, < 0x21000016 >, < 0x22000017 >, < 0x1e000011 >;
-				nordic,drive-mode = < 0x3 >;
-			};
-		};
-		qspi_sleep: qspi_sleep {
-			phandle = < 0x13 >;
-			group1 {
-				psels = < 0x1d000013 >, < 0x1f000014 >, < 0x20000015 >, < 0x21000016 >, < 0x22000017 >;
-				low-power-enable;
-			};
-			group2 {
-				psels = < 0x1e000011 >;
-				low-power-enable;
-				bias-pull-up;
 			};
 		};
 		spi3_default: spi3_default {
-			phandle = < 0x15 >;
+			phandle = < 0xe >;
 			group1 {
-				psels = < 0x400002f >, < 0x600002e >, < 0x500002d >;
+				psels = < 0x4000011 >, < 0x5000014 >, < 0x6000016 >;
 			};
 		};
 		spi3_sleep: spi3_sleep {
-			phandle = < 0x16 >;
+			phandle = < 0xf >;
 			group1 {
-				psels = < 0x400002f >, < 0x600002e >, < 0x500002d >;
+				psels = < 0x4000011 >, < 0x5000014 >, < 0x6000016 >;
 				low-power-enable;
 			};
 		};
@@ -754,90 +692,50 @@
 	};
 	leds {
 		compatible = "gpio-leds";
-		led0: led_0 {
-			gpios = < &gpio0 0xd 0x1 >;
+		led0_green: led_0 {
+			gpios = < &gpio0 0x6 0x1 >;
 			label = "Green LED 0";
 		};
-		led1: led_1 {
-			gpios = < &gpio0 0xe 0x1 >;
+		led1_red: led_1 {
+			gpios = < &gpio0 0x8 0x1 >;
+			label = "Red LED 1";
+		};
+		led1_green: led_2 {
+			gpios = < &gpio1 0x9 0x1 >;
 			label = "Green LED 1";
 		};
-		led2: led_2 {
-			gpios = < &gpio0 0xf 0x1 >;
-			label = "Green LED 2";
-		};
-		led3: led_3 {
-			gpios = < &gpio0 0x10 0x1 >;
-			label = "Green LED 3";
-		};
-		ledred: ledred_0 {
-			gpios = < &gpio0 0x18 0x0 >;
-			label = "Red LED";
-		};
-		ledgreen: ledgreen_0 {
-			gpios = < &gpio1 0x0 0x0 >;
-			label = "Green LED";
-		};
-		ledblue: ledblue_0 {
-			gpios = < &gpio0 0xb 0x0 >;
-			label = "Blue LED";
+		led1_blue: led_3 {
+			gpios = < &gpio0 0xc 0x1 >;
+			label = "Blue LED 1";
 		};
 	};
 	pwmleds {
 		compatible = "pwm-leds";
-		pwm_led0: pwm_led_0 {
-			pwms = < &pwm0 0x0 0x1312d00 0x1 >;
+		red_pwm_led: red_pwm: pwm_led_0 {
+			pwms = < &pwm0 0x0 0x1312d00 0x0 >;
+			label = "Red PWM LED";
+		};
+		green_pwm_led: green_pwm: pwm_led_1 {
+			pwms = < &pwm0 0x1 0x1312d00 0x0 >;
+			label = "Green PWM LED";
+		};
+		blue_pwm_led: blue_pwm: pwm_led_2 {
+			pwms = < &pwm0 0x2 0x1312d00 0x0 >;
+			label = "Blue PWM LED";
 		};
 	};
 	buttons {
 		compatible = "gpio-keys";
 		button0: button_0 {
-			gpios = < &gpio0 0xb 0x11 >;
+			gpios = < &gpio1 0x6 0x11 >;
 			label = "Push button switch 0";
 			zephyr,code = < 0xb >;
 		};
-		button1: button_1 {
-			gpios = < &gpio0 0xc 0x11 >;
-			label = "Push button switch 1";
-			zephyr,code = < 0x2 >;
-		};
-		button2: button_2 {
-			gpios = < &gpio0 0x18 0x11 >;
-			label = "Push button switch 2";
-			zephyr,code = < 0x3 >;
-		};
-		button3: button_3 {
-			gpios = < &gpio0 0x19 0x11 >;
-			label = "Push button switch 3";
-			zephyr,code = < 0x4 >;
-		};
 	};
-	arduino_header: connector {
-		compatible = "arduino-header-r3";
-		#gpio-cells = < 0x2 >;
-		gpio-map-mask = < 0xffffffff 0xffffffc0 >;
-		gpio-map-pass-thru = < 0x0 0x3f >;
-		gpio-map = < 0x0 0x0 &gpio0 0x3 0x0 >, < 0x1 0x0 &gpio0 0x4 0x0 >, < 0x2 0x0 &gpio0 0x1c 0x0 >, < 0x3 0x0 &gpio0 0x1d 0x0 >, < 0x4 0x0 &gpio0 0x1e 0x0 >, < 0x5 0x0 &gpio0 0x1f 0x0 >, < 0x6 0x0 &gpio1 0x1 0x0 >, < 0x7 0x0 &gpio1 0x2 0x0 >, < 0x8 0x0 &gpio1 0x3 0x0 >, < 0x9 0x0 &gpio1 0x4 0x0 >, < 0xa 0x0 &gpio1 0x5 0x0 >, < 0xb 0x0 &gpio1 0x6 0x0 >, < 0xc 0x0 &gpio1 0x7 0x0 >, < 0xd 0x0 &gpio1 0x8 0x0 >, < 0xe 0x0 &gpio1 0xa 0x0 >, < 0xf 0x0 &gpio1 0xb 0x0 >, < 0x10 0x0 &gpio1 0xc 0x0 >, < 0x11 0x0 &gpio1 0xd 0x0 >, < 0x12 0x0 &gpio1 0xe 0x0 >, < 0x13 0x0 &gpio1 0xf 0x0 >, < 0x14 0x0 &gpio0 0x1a 0x0 >, < 0x15 0x0 &gpio0 0x1b 0x0 >;
-		phandle = < 0x14 >;
-	};
-	arduino_adc: analog-connector {
-		compatible = "arduino,uno-adc";
-		#io-channel-cells = < 0x1 >;
-		io-channel-map = < 0x0 &adc 0x1 >, < 0x1 &adc 0x2 >, < 0x2 &adc 0x4 >, < 0x3 &adc 0x5 >, < 0x4 &adc 0x6 >, < 0x5 &adc 0x7 >;
-	};
-	custom_gpios {
-		compatible = "gpio-keys";
-		datapluspin: datapluspin_0 {
-			gpios = < &gpio0 0x14 0x11 >;
-			label = "Data Plus Pin";
-		};
-		dataminuspin: dataminuspin_0 {
-			gpios = < &gpio0 0x16 0x11 >;
-			label = "Data Minus Pin";
-		};
-		spdtswitchpin: spdtswitchpin_0 {
-			gpios = < &gpio0 0x11 0x11 >;
-			label = "SPDT Power Switch";
-		};
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = < &adc 0x0 >;
+		output-ohms = < 0x186a0 >;
+		full-ohms = < 0x30d40 >;
 	};
 };
