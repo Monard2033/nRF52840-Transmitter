@@ -1,0 +1,130 @@
+/*
+ * Pro Micro nRF52840 overlay — Wireless Keyboard Transmitter
+ * Adds: SPIS1 (SPI slave on instance 1), battery ADC channel, 3-channel RGB PWM
+ * Disables: USB (not used by this SPI+ESB project)
+ */
+
+#include <zephyr/dt-bindings/adc/adc.h>
+
+/* The transmitter USB port is a CDC ACM debug console. */
+&usbd {
+	status = "okay";
+};
+
+/* Overwrite board's single-channel pwm0 pinctrl with 3-channel RGB */
+&pinctrl {
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 24)>,  /* P0.24 Red   */
+				<NRF_PSEL(PWM_OUT1, 1, 0)>,   /* P1.00 Green */
+				<NRF_PSEL(PWM_OUT2, 0, 11)>;  /* P0.11 Blue  */
+		};
+	};
+
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 24)>,
+				<NRF_PSEL(PWM_OUT1, 1, 0)>,
+				<NRF_PSEL(PWM_OUT2, 0, 11)>;
+			low-power-enable;
+		};
+	};
+
+	/* SPI slave pinctrl — pins match RP2040 SPI master wiring:
+	 *   SCK  = P0.17  (RP2040 GP6)
+	 *   MOSI = P0.20  (RP2040 GP7)
+	 *   CSN  = P0.22  (RP2040 GP9)  <-- hardware chip-select, frames the transfer
+	 *   MISO = P0.08  (RP2040 GP8, unused/write-only link, just parked here)
+	 *
+	 * IMPORTANT: nRF52840 instance 3 (0x4002F000) is SPIM3-only — NO SPIS support.
+	 * We use SPIS1 (instance 1, 0x40004000) instead. i2c1 is disabled below
+	 * to free the shared instance.
+	 */
+	spis1_default: spis1_default {
+		group1 {
+			psels = <NRF_PSEL(SPIS_SCK, 0, 17)>,
+				<NRF_PSEL(SPIS_MOSI, 0, 20)>,
+				<NRF_PSEL(SPIS_MISO, 0, 8)>,
+				<NRF_PSEL(SPIS_CSN, 0, 22)>;
+		};
+	};
+
+	spis1_sleep: spis1_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIS_SCK, 0, 17)>,
+				<NRF_PSEL(SPIS_MOSI, 0, 20)>,
+				<NRF_PSEL(SPIS_MISO, 0, 8)>,
+				<NRF_PSEL(SPIS_CSN, 0, 22)>;
+			low-power-enable;
+		};
+	};
+};
+
+/* Disable i2c1 to free shared instance 1 for SPIS1.
+	 * This project does not use I2C1. */
+&i2c1 {
+	status = "disabled";
+};
+
+/* SPIS1 slave — instance 1 (0x40004000) supports SPIS, unlike SPIM3.
+	 * Same physical pins as before (PSEL routes any GPIO to any instance). */
+&spi1 {
+	compatible = "nordic,nrf-spis";
+	status = "okay";
+	pinctrl-0 = <&spis1_default>;
+	pinctrl-1 = <&spis1_sleep>;
+	pinctrl-names = "default", "sleep";
+	def-char = <0x00>;
+};
+
+/* Battery voltage divider: Vbat -> 200kΩ -> ADC AIN0 -> 100kΩ -> GND
+ * AIN0 = P0.02 (SAADC CH0, positive input 0)
+ * Divider ratio: 200k/(200k+100k) = 2/3, so output_ohms/full_ohms = 200k/300k
+ */
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <10>;
+		zephyr,oversampling = <0>;
+		zephyr,input-positive = <0>;
+		zephyr,vref-mv = <3300>;   /* required for VDD-relative reference to convert correctly */
+	};
+};
+
+/ {
+	/* RGB PWM LED node (used by pwm_dt_spec in main.c) */
+	pwmleds {
+		compatible = "pwm-leds";
+		red_pwm: pwm_led_0 {
+			pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+			label = "Red PWM LED";
+		};
+		green_pwm: pwm_led_1 {
+			pwms = <&pwm0 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+			label = "Green PWM LED";
+		};
+		blue_pwm: pwm_led_2 {
+			pwms = <&pwm0 2 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+			label = "Blue PWM LED";
+		};
+	};
+
+	/* Battery voltage divider for io-channels */
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc 0>;
+		output-ohms = <200000>;   /* 200kΩ high-side */
+		full-ohms = <300000>;      /* 200k + 100k total */
+	};
+
+	aliases {
+		/* Keep board aliases, add battery */
+		battery = &vbatt;
+	};
+};

@@ -1,212 +1,336 @@
 /*
  * Copyright (c) 2024 Monard2033
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Wireless keyboard transmitter:
+ *   8-byte SPI slave keyboard report -> reliable ESB PTX packet.
  */
 
- #include <zephyr/kernel.h>
- #include <zephyr/drivers/gpio.h>
- #include <zephyr/pm/pm.h>
- #include <zephyr/pm/device.h>
- #include <zephyr/pm/state.h>
- #include <zephyr/pm/policy.h>
- #include <zephyr/logging/log.h>
- #include <zephyr/device.h>
- #include <esb.h>
- #include <string.h>
- #include <zephyr/sys/poweroff.h> // For sys_poweroff
- #include <nrfx.h> // For nrf_gpio_ functions
- #include <hal/nrf_gpio.h> // Use the correct path for nrf_gpio functions
- 
- LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
- /* --- Function Forward Declarations --- */
- void sample_and_transmit(struct k_timer *timer);
- void enter_low_power(struct k_timer *timer);
- 
- /* --- Pin Definitions from Device Tree --- */
- #define GPIO020_NODE   DT_ALIAS(datapluspin)
- #define GPIO020        DT_GPIO_FLAGS(GPIO020_NODE, gpios)
- static const struct gpio_dt_spec *data_plus = &((const struct gpio_dt_spec)GPIO_DT_SPEC_GET(GPIO020_NODE, gpios));
- 
- #define GPIO022_NODE  DT_ALIAS(dataminuspin)
- #define GPIO022       DT_GPIO_FLAGS(GPIO022_NODE, gpios)
- static const struct gpio_dt_spec *data_minus = &((const struct gpio_dt_spec)GPIO_DT_SPEC_GET(GPIO022_NODE, gpios));
- 
- #define GPIO017_NODE DT_ALIAS(spdtswitchpin)
- #define GPIO017      DT_GPIO_FLAGS(GPIO017_NODE, gpios)
- static const struct gpio_dt_spec *spdt_switch = &((const struct gpio_dt_spec)GPIO_DT_SPEC_GET(GPIO017_NODE, gpios));
- 
- #define GPIO024_NODE         DT_ALIAS(ledred)
- #define GPIO024          DT_GPIO_FLAGS(GPIO024_NODE, gpios)
- static const struct gpio_dt_spec *led_red = &((const struct gpio_dt_spec)GPIO_DT_SPEC_GET(GPIO024_NODE, gpios));
- 
- #define GPIO10_NODE       DT_ALIAS(ledgreen)
- #define GPIO10        DT_GPIO_FLAGS(GPIO10_NODE, gpios)
- static const struct gpio_dt_spec *led_green = &((const struct gpio_dt_spec)GPIO_DT_SPEC_GET(GPIO10_NODE, gpios));
- 
- #define GPIO011_NODE        DT_ALIAS(ledblue)
- #define GPIO011        DT_GPIO_FLAGS(GPIO011_NODE, gpios)
- static const struct gpio_dt_spec *led_blue = &((const struct gpio_dt_spec)GPIO_DT_SPEC_GET(GPIO011_NODE, gpios));
- 
- enum led_color { LED_RED, LED_GREEN, LED_BLUE, LED_OFF};
- 
- /* --- ESB and Power Management --- */
- static struct esb_payload tx_payload;
- static uint8_t last_payload_data[2] = {0xFF, 0xFF}; // Initialize to a value that won't match first read
- 
- static K_TIMER_DEFINE(sampling_timer, sample_and_transmit, NULL);
- static K_TIMER_DEFINE(inactivity_timer, enter_low_power, NULL);
- 
- #define INACTIVITY_TIMEOUT K_SECONDS(60)
- #define SAMPLE_INTERVAL K_MSEC(10) // Changed to milliseconds for more realistic sampling
- 
- /* --- Function Definitions --- */
- 
- void set_led_status(enum led_color color)
- {
-	 // Ensure the GPIO port is ready before trying to set the pin
-	 if (led_red && device_is_ready(led_red->port)) {
-		 gpio_pin_set_dt(led_red, (color == LED_RED));
-	 }
-	 if (led_green && device_is_ready(led_green->port)) {
-		 gpio_pin_set_dt(led_green, (color == LED_GREEN));
-	 }
-	 if (led_blue && device_is_ready(led_blue->port)) {
-		 gpio_pin_set_dt(led_blue, (color == LED_BLUE));
-	 }
- }
- 
- void enter_low_power(struct k_timer *timer)
- {
-	 LOG_INF("Inactivity detected. Entering System ON idle mode.");
-	 set_led_status(LED_BLUE); // Indicate idle state
-	 esb_disable(); // Disable ESB to save power
-	 // System will enter idle mode via k_sleep(K_FOREVER) in main
- }
- 
- void pin_activity_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
- {
-	 // Restart the inactivity timer on any pin activity
-	 k_timer_start(&inactivity_timer, INACTIVITY_TIMEOUT, K_NO_WAIT);
-	 LOG_DBG("Pin activity detected, resetting inactivity timer.");
- }
- 
- void sample_and_transmit(struct k_timer *timer)
- {
-	 uint8_t payload_data[2];
-	 payload_data[0] = gpio_pin_get_dt(data_plus);
-	 payload_data[1] = gpio_pin_get_dt(data_minus);
- 
-	 // Only transmit if the data has changed
-	 if (payload_data[0] != last_payload_data[0] || payload_data[1] != last_payload_data[1]) {
-		 // Reset inactivity timer because we have active data change
-		 k_timer_start(&inactivity_timer, INACTIVITY_TIMEOUT, K_NO_WAIT);
-		 set_led_status(LED_GREEN); // Indicate active transmission
- 
-		 // Prepare payload for ESB
-		 tx_payload.length = sizeof(payload_data);
-		 memcpy(tx_payload.data, payload_data, sizeof(payload_data));
-		 
-		 // Update last sent data
-		 last_payload_data[0] = payload_data[0];
-		 last_payload_data[1] = payload_data[1];
- 
-		 if (esb_write_payload(&tx_payload) == 0) {
-			 LOG_INF("TX -> D+: %d, D-: %d", payload_data[0], payload_data[1]);
-		 } else {
-			 LOG_ERR("Failed to write payload");
-			 set_led_status(LED_RED);
-		 }
-	 }
- }
- 
- int main(void)
- {
-	 /* ---- Initialize GPIOs --- */
-	 int err;
- 
-	 LOG_INF("Starting Wireless Keyboard Transmitter...");
- 
-	 /* --- Initialize GPIOs --- */
-	 if (!device_is_ready(spdt_switch->port)) {
-		 LOG_ERR("SPDT Switch GPIO device not ready");
-		 set_led_status(LED_RED);
-		 return 0;
-	 }
-	 // Configure switch pin as input and wakeup source
-	 err = gpio_pin_configure_dt(spdt_switch, GPIO_INPUT);
-	 if (err) {
-		 LOG_ERR("Failed to configure SPDT switch pin, err %d", err);
-		 return 0;
-	 }
-	 // Configure SPDT switch as wakeup source for System OFF
-	 nrf_gpio_cfg_input(spdt_switch->pin, GPIO_PULL_UP);
-	 nrf_gpio_cfg_sense_set(spdt_switch->pin, GPIO_PIN_CNF_SENSE_Low); // Wake on LOW to HIGH transition
- 
-	 if (gpio_pin_get_dt(spdt_switch) == 0) {
-		 LOG_WRN("SPDT switch is off. Entering System OFF mode.");
-		 set_led_status(LED_RED);
-		 sys_poweroff();
-		 return 0; // Unreachable after sys_poweroff
-	 }
- 
-	 // Configure data pins as inputs
-	 if (!device_is_ready(data_plus->port) || !device_is_ready(data_minus->port)) {
-		 LOG_ERR("Data GPIOs not ready");
-		 return 0;
-	 }
-	 gpio_pin_configure_dt(data_plus, GPIO_INPUT);
-	 gpio_pin_configure_dt(data_minus, GPIO_INPUT);
- 
-	 /* --- Initialize LEDs --- */
-	 if (led_red && device_is_ready(led_red->port)) gpio_pin_configure_dt(led_red, GPIO_OUTPUT_INACTIVE);
-	 if (led_green && device_is_ready(led_green->port)) gpio_pin_configure_dt(led_green, GPIO_OUTPUT_INACTIVE);
-	 if (led_blue && device_is_ready(led_blue->port)) gpio_pin_configure_dt(led_blue, GPIO_OUTPUT_INACTIVE);
- 
-	 set_led_status(LED_GREEN); // Indicate device is on and active
- 
-	 /* --- Configure GPIO Interrupt for Wake-up --- */
-	 static struct gpio_callback pin_cb_data;
-	 gpio_init_callback(&pin_cb_data, pin_activity_handler, BIT(data_plus->pin) | BIT(data_minus->pin));
-	 err = gpio_add_callback(data_plus->port, &pin_cb_data); // Use port from gpio_dt_spec
-	 if (err) {
-		 LOG_ERR("Failed to add callback on port, err %d", err);
-		 return 0;
-	 }
-	 gpio_pin_interrupt_configure_dt(data_plus, GPIO_INT_EDGE_BOTH);
-	 gpio_pin_interrupt_configure_dt(data_minus, GPIO_INT_EDGE_BOTH);
- 
-	 /* --- Initialize ESB --- */
-	 struct esb_config config = ESB_DEFAULT_CONFIG;
-	 config.protocol = ESB_PROTOCOL_ESB_DPL;
-	 config.mode = ESB_MODE_PTX;
-	 config.bitrate = ESB_BITRATE_2MBPS;
-	 config.retransmit_count = 3;
-	 config.payload_length = 2; // Fixed payload length
- 
-	 err = esb_init(&config);
-	 if (err) {
-		 LOG_ERR("ESB initialization failed, err %d", err);
-		 return 0;
-	 }
-	 // Set a base address and pipe for communication
-	 uint8_t base_addr_0[4] = {0xAB, 0x12, 0xCD, 0x34};
-	 err = esb_set_base_address_0(base_addr_0);
-	 if (err) { LOG_ERR("Failed to set base address 0"); return 0; }
-	 uint8_t prefixes[8] = {0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8};
-	 // Set prefixes for the ESB pipes
-	 err = esb_set_prefixes(prefixes, 8);
-	 if (err) { LOG_ERR("Failed to set prefixes"); return 0; }
-	 
-	 LOG_INF("Transmitter initialized successfully");
-	 
-	 /* --- Start Timers --- */
-	 k_timer_start(&sampling_timer, K_NO_WAIT, SAMPLE_INTERVAL);
-	 k_timer_start(&inactivity_timer, INACTIVITY_TIMEOUT, K_NO_WAIT);
-	 
-	 // System will enter idle mode automatically when idle
-	 while (1) {
-		 k_sleep(K_FOREVER);
-	 }
- 
-	 return 0;
- }
+#include <errno.h>
+#include <string.h>
+
+#include <esb.h>
+#include <nrfx.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/spi.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/usb/usb_device.h>
+
+LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
+
+#define KEYBOARD_REPORT_SIZE    8U
+#define LINK_MAGIC              0xA5U
+#define LINK_VERSION            0x01U
+#define LINK_TYPE_KEYBOARD      0x01U
+#define LINK_RF_CHANNEL         80U
+#define REPORT_QUEUE_DEPTH      32U
+#define REPORT_KEEPALIVE_MS     250
+#define APP_TX_RETRY_COUNT      2U
+#define ESB_EVENT_TIMEOUT_MS    50
+
+struct link_keyboard_packet {
+	uint8_t magic;
+	uint8_t version;
+	uint8_t type;
+	uint8_t sequence;
+	uint8_t report[KEYBOARD_REPORT_SIZE];
+} __packed;
+
+struct keyboard_report {
+	uint8_t data[KEYBOARD_REPORT_SIZE];
+};
+
+BUILD_ASSERT(sizeof(struct link_keyboard_packet) == 12U);
+
+static const struct device *const spi_device =
+	DEVICE_DT_GET(DT_NODELABEL(spi1));
+
+static const struct spi_config spi_config = {
+	.frequency = 4000000U,
+	.operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
+	.slave = 0,
+};
+
+K_MSGQ_DEFINE(report_queue, sizeof(struct keyboard_report),
+	      REPORT_QUEUE_DEPTH, sizeof(uint32_t));
+static K_SEM_DEFINE(esb_tx_done, 0, 1);
+static K_SEM_DEFINE(esb_started, 0, 1);
+
+static struct esb_config esb_config = ESB_DEFAULT_CONFIG;
+static struct esb_payload esb_tx_payload;
+static atomic_t esb_last_tx_succeeded;
+
+static atomic_t spi_frames;
+static atomic_t spi_errors;
+static atomic_t report_queue_overruns;
+static atomic_t esb_tx_successes;
+static atomic_t esb_tx_failures;
+static atomic_t esb_tx_timeouts;
+static atomic_t esb_link_probes;
+
+static void transmitter_esb_event_handler(const struct esb_evt *event)
+{
+	switch (event->evt_id) {
+	case ESB_EVENT_TX_SUCCESS:
+		atomic_set(&esb_last_tx_succeeded, 1);
+		atomic_inc(&esb_tx_successes);
+		k_sem_give(&esb_tx_done);
+		break;
+	case ESB_EVENT_TX_FAILED:
+		atomic_set(&esb_last_tx_succeeded, 0);
+		atomic_inc(&esb_tx_failures);
+		k_sem_give(&esb_tx_done);
+		break;
+	case ESB_EVENT_RX_RECEIVED:
+		/* This application does not use acknowledgement payloads. */
+		break;
+	default:
+		break;
+	}
+}
+
+static int esb_initialize(void)
+{
+	static const uint8_t base_address_0[4] = {
+		0xE7, 0xE7, 0xE7, 0xE7
+	};
+	static const uint8_t base_address_1[4] = {
+		0xC2, 0xC2, 0xC2, 0xC2
+	};
+	static const uint8_t address_prefixes[8] = {
+		0xE7, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8
+	};
+	int err;
+
+	esb_config.protocol = ESB_PROTOCOL_ESB_DPL;
+	esb_config.mode = ESB_MODE_PTX;
+	esb_config.bitrate = ESB_BITRATE_1MBPS;
+	esb_config.tx_output_power = ESB_TX_POWER_8DBM;
+	esb_config.retransmit_delay = 600;
+	esb_config.retransmit_count = 10;
+	esb_config.payload_length = sizeof(struct link_keyboard_packet);
+	esb_config.selective_auto_ack = true;
+	esb_config.event_handler = transmitter_esb_event_handler;
+
+	err = esb_init(&esb_config);
+	if (err != 0) {
+		return err;
+	}
+
+	err = esb_set_base_address_0(base_address_0);
+	if (err != 0) {
+		return err;
+	}
+
+	err = esb_set_base_address_1(base_address_1);
+	if (err != 0) {
+		return err;
+	}
+
+	err = esb_set_prefixes(address_prefixes, ARRAY_SIZE(address_prefixes));
+	if (err != 0) {
+		return err;
+	}
+
+	return esb_set_rf_channel(LINK_RF_CHANNEL);
+}
+
+static void queue_report(const uint8_t report[KEYBOARD_REPORT_SIZE])
+{
+	struct keyboard_report item;
+
+	memcpy(item.data, report, sizeof(item.data));
+	if (k_msgq_put(&report_queue, &item, K_NO_WAIT) == 0) {
+		return;
+	}
+
+	/*
+	 * Reports are complete keyboard states. When saturated, replacing the
+	 * oldest state with the newest gives the receiver the state that matters
+	 * and prevents a release from being stuck behind stale reports.
+	 */
+	struct keyboard_report discarded;
+
+	atomic_inc(&report_queue_overruns);
+	if (k_msgq_get(&report_queue, &discarded, K_NO_WAIT) == 0) {
+		(void)k_msgq_put(&report_queue, &item, K_NO_WAIT);
+	}
+}
+
+static int esb_send_report(const struct keyboard_report *report)
+{
+	static uint8_t sequence;
+	struct link_keyboard_packet packet = {
+		.magic = LINK_MAGIC,
+		.version = LINK_VERSION,
+		.type = LINK_TYPE_KEYBOARD,
+		.sequence = sequence++,
+	};
+	int err = -EIO;
+
+	memcpy(packet.report, report->data, sizeof(packet.report));
+
+	esb_tx_payload.length = sizeof(packet);
+	esb_tx_payload.pipe = 0;
+	esb_tx_payload.noack = false;
+	memcpy(esb_tx_payload.data, &packet, sizeof(packet));
+
+	for (uint32_t attempt = 0; attempt <= APP_TX_RETRY_COUNT; ++attempt) {
+		k_sem_reset(&esb_tx_done);
+		atomic_set(&esb_last_tx_succeeded, 0);
+		esb_flush_tx();
+
+		err = esb_write_payload(&esb_tx_payload);
+		if (err != 0) {
+			LOG_WRN("ESB queue failed: %d", err);
+			continue;
+		}
+
+		err = k_sem_take(&esb_tx_done, K_MSEC(ESB_EVENT_TIMEOUT_MS));
+		if (err != 0) {
+			atomic_inc(&esb_tx_timeouts);
+			LOG_ERR("ESB event timeout");
+			esb_flush_tx();
+			return -ETIMEDOUT;
+		}
+
+		if (atomic_get(&esb_last_tx_succeeded) != 0) {
+			return 0;
+		}
+
+		err = -EIO;
+	}
+
+	return err;
+}
+
+static void radio_thread(void)
+{
+	struct keyboard_report report = { 0 };
+
+	k_sem_take(&esb_started, K_FOREVER);
+	for (;;) {
+		/*
+		 * Send a harmless all-keys-released report once per second when
+		 * SPI is idle. This verifies the ESB link independently of RP2040.
+		 */
+		if (k_msgq_get(&report_queue, &report, K_SECONDS(1)) != 0) {
+			memset(&report, 0, sizeof(report));
+			atomic_inc(&esb_link_probes);
+		}
+
+		if (esb_send_report(&report) != 0) {
+			LOG_WRN_RATELIMIT("Report was not acknowledged");
+		}
+	}
+}
+
+K_THREAD_DEFINE(radio_thread_id, 1536, radio_thread,
+		NULL, NULL, NULL, 5, 0, 0);
+
+static void status_thread(void)
+{
+	for (;;) {
+		k_sleep(K_SECONDS(5));
+		LOG_INF("SPI=%ld err=%ld queue_drop=%ld probe=%ld ESB_ok=%ld fail=%ld "
+			"timeout=%ld RF[state=%lu cfg_ch=%u reg_ch=%lu mode=%lu txpipe=%lu] "
+			"HF=0x%08lx",
+			(long)atomic_get(&spi_frames),
+			(long)atomic_get(&spi_errors),
+			(long)atomic_get(&report_queue_overruns),
+			(long)atomic_get(&esb_link_probes),
+			(long)atomic_get(&esb_tx_successes),
+			(long)atomic_get(&esb_tx_failures),
+			(long)atomic_get(&esb_tx_timeouts),
+			(unsigned long)NRF_RADIO->STATE,
+			LINK_RF_CHANNEL,
+			(unsigned long)NRF_RADIO->FREQUENCY,
+			(unsigned long)NRF_RADIO->MODE,
+			(unsigned long)NRF_RADIO->TXADDRESS,
+			(unsigned long)NRF_CLOCK->HFCLKSTAT);
+	}
+}
+
+K_THREAD_DEFINE(status_thread_id, 1024, status_thread,
+		NULL, NULL, NULL, 7, 0, 0);
+
+int main(void)
+{
+	uint8_t spi_rx[KEYBOARD_REPORT_SIZE] __aligned(sizeof(uint32_t));
+	uint8_t previous_report[KEYBOARD_REPORT_SIZE] = { 0 };
+	int64_t previous_queue_time = 0;
+	bool previous_report_valid = false;
+	int err;
+
+	LOG_INF("Starting SPI-to-ESB keyboard transmitter");
+
+	err = usb_enable(NULL);
+	if (err != 0) {
+		LOG_ERR("USB CDC initialization failed: %d", err);
+		return err;
+	}
+
+	if (!device_is_ready(spi_device)) {
+		LOG_ERR("SPI slave device is not ready");
+		return -ENODEV;
+	}
+
+	err = esb_initialize();
+	if (err != 0) {
+		LOG_ERR("ESB initialization failed: %d", err);
+		return err;
+	}
+	k_sem_give(&esb_started);
+
+	LOG_INF("Ready: SPI slave on %s, ESB PTX channel %u, pipe 0 address E7:E7E7E7E7",
+		spi_device->name, LINK_RF_CHANNEL);
+
+	for (;;) {
+		struct spi_buf rx_buffer = {
+			.buf = spi_rx,
+			.len = sizeof(spi_rx),
+		};
+		const struct spi_buf_set rx = {
+			.buffers = &rx_buffer,
+			.count = 1,
+		};
+
+		memset(spi_rx, 0, sizeof(spi_rx));
+		err = spi_transceive(spi_device, &spi_config, NULL, &rx);
+		if (err < 0) {
+			atomic_inc(&spi_errors);
+			LOG_ERR("SPI slave transfer failed: %d", err);
+			k_msleep(1);
+			continue;
+		}
+
+		/*
+		 * In Zephyr slave mode, the positive return value is the number
+		 * of received 8-bit frames. Reject short chip-select windows.
+		 */
+		if (err != KEYBOARD_REPORT_SIZE) {
+			atomic_inc(&spi_errors);
+			LOG_WRN("Ignoring short SPI report: %d/8 bytes", err);
+			continue;
+		}
+
+		atomic_inc(&spi_frames);
+
+		const int64_t now = k_uptime_get();
+		const bool changed =
+			!previous_report_valid ||
+			memcmp(spi_rx, previous_report, sizeof(spi_rx)) != 0;
+		const bool keepalive_due =
+			(now - previous_queue_time) >= REPORT_KEEPALIVE_MS;
+
+		if (changed || keepalive_due) {
+			queue_report(spi_rx);
+			memcpy(previous_report, spi_rx, sizeof(previous_report));
+			previous_report_valid = true;
+			previous_queue_time = now;
+		}
+	}
+}
