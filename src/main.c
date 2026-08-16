@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Wireless keyboard transmitter:
- *   8-byte SPI slave keyboard report -> reliable ESB PTX packet.
+ *   12-byte typed SPI input frame -> reliable 12-byte ESB PTX packet.
  */
 
 #include <errno.h>
@@ -21,29 +21,26 @@
 
 LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 
-#define KEYBOARD_REPORT_SIZE    8U
+#define INPUT_DATA_SIZE         8U
 #define LINK_MAGIC              0xA5U
-#define LINK_VERSION            0x01U
+#define LINK_VERSION            0x02U
 #define LINK_TYPE_KEYBOARD      0x01U
+#define LINK_TYPE_CONSUMER      0x02U
 #define LINK_RF_CHANNEL         80U
 #define REPORT_QUEUE_DEPTH      32U
 #define REPORT_KEEPALIVE_MS     8
 #define APP_TX_RETRY_COUNT      0U
 #define ESB_EVENT_TIMEOUT_US    2000
 
-struct link_keyboard_packet {
+struct link_input_packet {
 	uint8_t magic;
 	uint8_t version;
 	uint8_t type;
 	uint8_t sequence;
-	uint8_t report[KEYBOARD_REPORT_SIZE];
+	uint8_t data[INPUT_DATA_SIZE];
 } __packed;
 
-struct keyboard_report {
-	uint8_t data[KEYBOARD_REPORT_SIZE];
-};
-
-BUILD_ASSERT(sizeof(struct link_keyboard_packet) == 12U);
+BUILD_ASSERT(sizeof(struct link_input_packet) == 12U);
 
 static const struct device *const spi_device =
 	DEVICE_DT_GET(DT_NODELABEL(spi1));
@@ -54,7 +51,7 @@ static const struct spi_config spi_config = {
 	.slave = 0,
 };
 
-K_MSGQ_DEFINE(report_queue, sizeof(struct keyboard_report),
+K_MSGQ_DEFINE(report_queue, sizeof(struct link_input_packet),
 	      REPORT_QUEUE_DEPTH, sizeof(uint32_t));
 static K_SEM_DEFINE(esb_tx_done, 0, 1);
 static K_SEM_DEFINE(esb_started, 0, 1);
@@ -111,7 +108,7 @@ static int esb_initialize(void)
 	esb_config.tx_output_power = ESB_TX_POWER_8DBM;
 	esb_config.retransmit_delay = 450;
 	esb_config.retransmit_count = 1;
-	esb_config.payload_length = sizeof(struct link_keyboard_packet);
+	esb_config.payload_length = sizeof(struct link_input_packet);
 	esb_config.selective_auto_ack = true;
 	esb_config.use_fast_ramp_up = true;
 	esb_config.event_handler = transmitter_esb_event_handler;
@@ -139,45 +136,32 @@ static int esb_initialize(void)
 	return esb_set_rf_channel(LINK_RF_CHANNEL);
 }
 
-static void queue_report(const uint8_t report[KEYBOARD_REPORT_SIZE])
+static void queue_packet(const struct link_input_packet *packet)
 {
-	struct keyboard_report item;
-
-	memcpy(item.data, report, sizeof(item.data));
-	if (k_msgq_put(&report_queue, &item, K_NO_WAIT) == 0) {
+	if (k_msgq_put(&report_queue, packet, K_NO_WAIT) == 0) {
 		return;
 	}
 
 	/*
-	 * Reports are complete keyboard states. When saturated, replacing the
-	 * oldest state with the newest gives the receiver the state that matters
-	 * and prevents a release from being stuck behind stale reports.
+	 * Frames are complete typed input states. When saturated, replace the
+	 * oldest frame with the newest so releases are not stuck behind stale data.
 	 */
-	struct keyboard_report discarded;
+	struct link_input_packet discarded;
 
 	atomic_inc(&report_queue_overruns);
 	if (k_msgq_get(&report_queue, &discarded, K_NO_WAIT) == 0) {
-		(void)k_msgq_put(&report_queue, &item, K_NO_WAIT);
+		(void)k_msgq_put(&report_queue, packet, K_NO_WAIT);
 	}
 }
 
-static int esb_send_report(const struct keyboard_report *report)
+static int esb_send_packet(const struct link_input_packet *packet)
 {
-	static uint8_t sequence;
-	struct link_keyboard_packet packet = {
-		.magic = LINK_MAGIC,
-		.version = LINK_VERSION,
-		.type = LINK_TYPE_KEYBOARD,
-		.sequence = sequence++,
-	};
 	int err = -EIO;
 
-	memcpy(packet.report, report->data, sizeof(packet.report));
-
-	esb_tx_payload.length = sizeof(packet);
+	esb_tx_payload.length = sizeof(*packet);
 	esb_tx_payload.pipe = 0;
 	esb_tx_payload.noack = false;
-	memcpy(esb_tx_payload.data, &packet, sizeof(packet));
+	memcpy(esb_tx_payload.data, packet, sizeof(*packet));
 
 	for (uint32_t attempt = 0; attempt <= APP_TX_RETRY_COUNT; ++attempt) {
 		k_sem_reset(&esb_tx_done);
@@ -210,25 +194,29 @@ static int esb_send_report(const struct keyboard_report *report)
 
 static void radio_thread(void)
 {
-	struct keyboard_report report = { 0 };
-	bool report_valid = false;
+	struct link_input_packet packet;
+	struct link_input_packet latest_keyboard;
+	bool latest_keyboard_valid = false;
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
 		/*
-		 * Never synthesize an all-keys-released report while SPI is idle:
-		 * that used to release a held key after one second. Instead, repeat
-		 * the latest complete state as a recovery keepalive.
+		 * Consumer frames are sent only when queued. During idle time repeat
+		 * only the latest keyboard state as the recovery keepalive.
 		 */
-		if (!report_valid) {
-			k_msgq_get(&report_queue, &report, K_FOREVER);
-			report_valid = true;
-		} else if (k_msgq_get(&report_queue, &report,
-				      K_MSEC(REPORT_KEEPALIVE_MS)) != 0) {
+		k_timeout_t const timeout = latest_keyboard_valid ?
+			K_MSEC(REPORT_KEEPALIVE_MS) : K_FOREVER;
+		if (k_msgq_get(&report_queue, &packet, timeout) == 0) {
+			if (packet.type == LINK_TYPE_KEYBOARD) {
+				latest_keyboard = packet;
+				latest_keyboard_valid = true;
+			}
+		} else {
+			packet = latest_keyboard;
 			atomic_inc(&esb_link_probes);
 		}
 
-		if (esb_send_report(&report) != 0) {
+		if (esb_send_packet(&packet) != 0) {
 			LOG_WRN_RATELIMIT("Report was not acknowledged");
 		}
 	}
@@ -265,13 +253,10 @@ K_THREAD_DEFINE(status_thread_id, 1024, status_thread,
 
 int main(void)
 {
-	uint8_t spi_rx[KEYBOARD_REPORT_SIZE] __aligned(sizeof(uint32_t));
-	uint8_t previous_report[KEYBOARD_REPORT_SIZE] = { 0 };
-	int64_t previous_queue_time = 0;
-	bool previous_report_valid = false;
+	struct link_input_packet spi_rx __aligned(sizeof(uint32_t));
 	int err;
 
-	LOG_INF("Starting SPI-to-ESB keyboard transmitter");
+	LOG_INF("Starting typed SPI-to-ESB keyboard/consumer transmitter");
 
 	err = usb_enable(NULL);
 	if (err != 0) {
@@ -297,7 +282,7 @@ int main(void)
 
 	for (;;) {
 		struct spi_buf rx_buffer = {
-			.buf = spi_rx,
+			.buf = &spi_rx,
 			.len = sizeof(spi_rx),
 		};
 		const struct spi_buf_set rx = {
@@ -305,7 +290,7 @@ int main(void)
 			.count = 1,
 		};
 
-		memset(spi_rx, 0, sizeof(spi_rx));
+		memset(&spi_rx, 0, sizeof(spi_rx));
 		err = spi_transceive(spi_device, &spi_config, NULL, &rx);
 		if (err < 0) {
 			atomic_inc(&spi_errors);
@@ -316,28 +301,25 @@ int main(void)
 
 		/*
 		 * In Zephyr slave mode, the positive return value is the number
-		 * of received 8-bit frames. Reject short chip-select windows.
+		 * of received 8-bit frames. Reject incomplete typed frames.
 		 */
-		if (err != KEYBOARD_REPORT_SIZE) {
+		if (err != sizeof(spi_rx)) {
 			atomic_inc(&spi_errors);
-			LOG_WRN("Ignoring short SPI report: %d/8 bytes", err);
+			LOG_WRN("Ignoring short SPI frame: %d/%u bytes", err,
+				(unsigned int)sizeof(spi_rx));
 			continue;
 		}
 
 		atomic_inc(&spi_frames);
-
-		const int64_t now = k_uptime_get();
-		const bool changed =
-			!previous_report_valid ||
-			memcmp(spi_rx, previous_report, sizeof(spi_rx)) != 0;
-		const bool keepalive_due =
-			(now - previous_queue_time) >= REPORT_KEEPALIVE_MS;
-
-		if (changed || keepalive_due) {
-			queue_report(spi_rx);
-			memcpy(previous_report, spi_rx, sizeof(previous_report));
-			previous_report_valid = true;
-			previous_queue_time = now;
+		if (spi_rx.magic != LINK_MAGIC || spi_rx.version != LINK_VERSION ||
+		    (spi_rx.type != LINK_TYPE_KEYBOARD &&
+		     spi_rx.type != LINK_TYPE_CONSUMER)) {
+			atomic_inc(&spi_errors);
+			LOG_WRN("Ignoring invalid SPI frame: magic=%02x version=%u type=%u",
+				spi_rx.magic, spi_rx.version, spi_rx.type);
+			continue;
 		}
+
+		queue_packet(&spi_rx);
 	}
 }
