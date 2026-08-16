@@ -27,9 +27,9 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_TYPE_KEYBOARD      0x01U
 #define LINK_RF_CHANNEL         80U
 #define REPORT_QUEUE_DEPTH      32U
-#define REPORT_KEEPALIVE_MS     250
-#define APP_TX_RETRY_COUNT      2U
-#define ESB_EVENT_TIMEOUT_MS    50
+#define REPORT_KEEPALIVE_MS     8
+#define APP_TX_RETRY_COUNT      0U
+#define ESB_EVENT_TIMEOUT_US    2000
 
 struct link_keyboard_packet {
 	uint8_t magic;
@@ -49,7 +49,7 @@ static const struct device *const spi_device =
 	DEVICE_DT_GET(DT_NODELABEL(spi1));
 
 static const struct spi_config spi_config = {
-	.frequency = 4000000U,
+	.frequency = 8000000U,
 	.operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
 	.slave = 0,
 };
@@ -107,12 +107,13 @@ static int esb_initialize(void)
 
 	esb_config.protocol = ESB_PROTOCOL_ESB_DPL;
 	esb_config.mode = ESB_MODE_PTX;
-	esb_config.bitrate = ESB_BITRATE_1MBPS;
+	esb_config.bitrate = ESB_BITRATE_2MBPS;
 	esb_config.tx_output_power = ESB_TX_POWER_8DBM;
-	esb_config.retransmit_delay = 600;
-	esb_config.retransmit_count = 10;
+	esb_config.retransmit_delay = 450;
+	esb_config.retransmit_count = 1;
 	esb_config.payload_length = sizeof(struct link_keyboard_packet);
 	esb_config.selective_auto_ack = true;
+	esb_config.use_fast_ramp_up = true;
 	esb_config.event_handler = transmitter_esb_event_handler;
 
 	err = esb_init(&esb_config);
@@ -189,7 +190,7 @@ static int esb_send_report(const struct keyboard_report *report)
 			continue;
 		}
 
-		err = k_sem_take(&esb_tx_done, K_MSEC(ESB_EVENT_TIMEOUT_MS));
+		err = k_sem_take(&esb_tx_done, K_USEC(ESB_EVENT_TIMEOUT_US));
 		if (err != 0) {
 			atomic_inc(&esb_tx_timeouts);
 			LOG_ERR("ESB event timeout");
@@ -210,15 +211,20 @@ static int esb_send_report(const struct keyboard_report *report)
 static void radio_thread(void)
 {
 	struct keyboard_report report = { 0 };
+	bool report_valid = false;
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
 		/*
-		 * Send a harmless all-keys-released report once per second when
-		 * SPI is idle. This verifies the ESB link independently of RP2040.
+		 * Never synthesize an all-keys-released report while SPI is idle:
+		 * that used to release a held key after one second. Instead, repeat
+		 * the latest complete state as a recovery keepalive.
 		 */
-		if (k_msgq_get(&report_queue, &report, K_SECONDS(1)) != 0) {
-			memset(&report, 0, sizeof(report));
+		if (!report_valid) {
+			k_msgq_get(&report_queue, &report, K_FOREVER);
+			report_valid = true;
+		} else if (k_msgq_get(&report_queue, &report,
+				      K_MSEC(REPORT_KEEPALIVE_MS)) != 0) {
 			atomic_inc(&esb_link_probes);
 		}
 
@@ -235,7 +241,7 @@ static void status_thread(void)
 {
 	for (;;) {
 		k_sleep(K_SECONDS(5));
-		LOG_INF("SPI=%ld err=%ld queue_drop=%ld probe=%ld ESB_ok=%ld fail=%ld "
+		LOG_INF("SPI=%ld err=%ld queue_drop=%ld keepalive=%ld ESB_ok=%ld fail=%ld "
 			"timeout=%ld RF[state=%lu cfg_ch=%u reg_ch=%lu mode=%lu txpipe=%lu] "
 			"HF=0x%08lx",
 			(long)atomic_get(&spi_frames),
@@ -285,7 +291,8 @@ int main(void)
 	}
 	k_sem_give(&esb_started);
 
-	LOG_INF("Ready: SPI slave on %s, ESB PTX channel %u, pipe 0 address E7:E7E7E7E7",
+	LOG_INF("Ready: SPI slave on %s at 8 MHz, ESB PTX 2 Mbps channel %u, "
+		"pipe 0 address E7:E7E7E7E7",
 		spi_device->name, LINK_RF_CHANNEL);
 
 	for (;;) {
