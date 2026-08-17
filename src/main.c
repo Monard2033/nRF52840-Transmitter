@@ -18,7 +18,6 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/util.h>
-#include <zephyr/usb/usb_device.h>
 #include <hal/nrf_gpio.h>
 
 LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
@@ -33,7 +32,7 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_RF_CHANNEL         80U
 #define REPORT_QUEUE_DEPTH      32U
 #define REPORT_KEEPALIVE_MS     8
-#define APP_TX_RETRY_COUNT      0U
+#define APP_TX_RETRY_COUNT      2U
 #define ESB_EVENT_TIMEOUT_US    2000
 #define WAKE_CSN_PIN            NRF_GPIO_PIN_MAP(0, 22)
 
@@ -141,10 +140,10 @@ static int esb_initialize(void)
 	return esb_set_rf_channel(LINK_RF_CHANNEL);
 }
 
-static void queue_packet(const struct link_input_packet *packet)
+static bool queue_packet(const struct link_input_packet *packet)
 {
 	if (k_msgq_put(&report_queue, packet, K_NO_WAIT) == 0) {
-		return;
+		return true;
 	}
 
 	/*
@@ -155,8 +154,9 @@ static void queue_packet(const struct link_input_packet *packet)
 
 	atomic_inc(&report_queue_overruns);
 	if (k_msgq_get(&report_queue, &discarded, K_NO_WAIT) == 0) {
-		(void)k_msgq_put(&report_queue, packet, K_NO_WAIT);
+		return k_msgq_put(&report_queue, packet, K_NO_WAIT) == 0;
 	}
+	return false;
 }
 
 static int esb_send_packet(const struct link_input_packet *packet)
@@ -222,18 +222,21 @@ static void radio_thread(void)
 	struct link_input_packet packet;
 	struct link_input_packet latest_keyboard;
 	bool latest_keyboard_valid = false;
+	bool keyboard_delivery_pending = false;
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
 		/* Consumer frames are transition-only. Keyboard keepalive runs only
 		 * while at least one normal key/modifier remains pressed. */
 		k_timeout_t const timeout = latest_keyboard_valid &&
-			!keyboard_packet_is_released(&latest_keyboard) ?
+			(!keyboard_packet_is_released(&latest_keyboard) ||
+			 keyboard_delivery_pending) ?
 			K_MSEC(REPORT_KEEPALIVE_MS) : K_FOREVER;
 		if (k_msgq_get(&report_queue, &packet, timeout) == 0) {
 			if (packet.type == LINK_TYPE_KEYBOARD) {
 				latest_keyboard = packet;
 				latest_keyboard_valid = true;
+				keyboard_delivery_pending = true;
 			}
 		} else {
 			packet = latest_keyboard;
@@ -242,6 +245,8 @@ static void radio_thread(void)
 
 		if (esb_send_packet(&packet) != 0) {
 			LOG_WRN_RATELIMIT("Report was not acknowledged");
+		} else if (packet.type == LINK_TYPE_KEYBOARD) {
+			keyboard_delivery_pending = false;
 		}
 	}
 }
@@ -249,6 +254,7 @@ static void radio_thread(void)
 K_THREAD_DEFINE(radio_thread_id, 1536, radio_thread,
 		NULL, NULL, NULL, 5, 0, 0);
 
+#if CONFIG_LOG
 static void status_thread(void)
 {
 	for (;;) {
@@ -274,19 +280,16 @@ static void status_thread(void)
 
 K_THREAD_DEFINE(status_thread_id, 1024, status_thread,
 		NULL, NULL, NULL, 7, 0, 0);
+#endif
 
 int main(void)
 {
 	struct link_input_packet spi_rx __aligned(sizeof(uint32_t));
+	struct link_input_packet last_spi_keyboard;
+	bool last_spi_keyboard_valid = false;
 	int err;
 
 	LOG_INF("Starting typed SPI-to-ESB keyboard/consumer transmitter");
-
-	err = usb_enable(NULL);
-	if (err != 0) {
-		LOG_ERR("USB CDC initialization failed: %d", err);
-		return err;
-	}
 
 	if (!device_is_ready(spi_device)) {
 		LOG_ERR("SPI slave device is not ready");
@@ -355,6 +358,19 @@ int main(void)
 			continue;
 		}
 
-		queue_packet(&spi_rx);
+		if (spi_rx.type == LINK_TYPE_KEYBOARD) {
+			if (last_spi_keyboard_valid &&
+			    memcmp(spi_rx.data, last_spi_keyboard.data,
+				   sizeof(spi_rx.data)) == 0) {
+				continue;
+			}
+			if (queue_packet(&spi_rx)) {
+				last_spi_keyboard = spi_rx;
+				last_spi_keyboard_valid = true;
+			}
+			continue;
+		}
+
+		(void)queue_packet(&spi_rx);
 	}
 }
