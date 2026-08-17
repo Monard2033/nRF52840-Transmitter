@@ -16,8 +16,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/usb/usb_device.h>
+#include <hal/nrf_gpio.h>
 
 LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 
@@ -26,11 +28,14 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_VERSION            0x02U
 #define LINK_TYPE_KEYBOARD      0x01U
 #define LINK_TYPE_CONSUMER      0x02U
+#define LINK_TYPE_CONTROL       0x03U
+#define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_RF_CHANNEL         80U
 #define REPORT_QUEUE_DEPTH      32U
 #define REPORT_KEEPALIVE_MS     8
 #define APP_TX_RETRY_COUNT      0U
 #define ESB_EVENT_TIMEOUT_US    2000
+#define WAKE_CSN_PIN            NRF_GPIO_PIN_MAP(0, 22)
 
 struct link_input_packet {
 	uint8_t magic;
@@ -192,6 +197,26 @@ static int esb_send_packet(const struct link_input_packet *packet)
 	return err;
 }
 
+static bool keyboard_packet_is_released(const struct link_input_packet *packet)
+{
+	static const uint8_t released[INPUT_DATA_SIZE] = { 0 };
+
+	return memcmp(packet->data, released, sizeof(released)) == 0;
+}
+
+static void transmitter_system_off(void)
+{
+	LOG_INF("Control request: entering System OFF; wake source is CSN/P0.22 LOW");
+	esb_disable();
+
+	/* SPIS no longer needs the CSN function after the complete control frame.
+	 * Reconfigure the same physical pin as an active-low System OFF source. */
+	nrf_gpio_cfg_sense_input(WAKE_CSN_PIN,
+				 NRF_GPIO_PIN_PULLUP,
+				 NRF_GPIO_PIN_SENSE_LOW);
+	sys_poweroff();
+}
+
 static void radio_thread(void)
 {
 	struct link_input_packet packet;
@@ -200,11 +225,10 @@ static void radio_thread(void)
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
-		/*
-		 * Consumer frames are sent only when queued. During idle time repeat
-		 * only the latest keyboard state as the recovery keepalive.
-		 */
-		k_timeout_t const timeout = latest_keyboard_valid ?
+		/* Consumer frames are transition-only. Keyboard keepalive runs only
+		 * while at least one normal key/modifier remains pressed. */
+		k_timeout_t const timeout = latest_keyboard_valid &&
+			!keyboard_packet_is_released(&latest_keyboard) ?
 			K_MSEC(REPORT_KEEPALIVE_MS) : K_FOREVER;
 		if (k_msgq_get(&report_queue, &packet, timeout) == 0) {
 			if (packet.type == LINK_TYPE_KEYBOARD) {
@@ -313,10 +337,21 @@ int main(void)
 		atomic_inc(&spi_frames);
 		if (spi_rx.magic != LINK_MAGIC || spi_rx.version != LINK_VERSION ||
 		    (spi_rx.type != LINK_TYPE_KEYBOARD &&
-		     spi_rx.type != LINK_TYPE_CONSUMER)) {
+		     spi_rx.type != LINK_TYPE_CONSUMER &&
+		     spi_rx.type != LINK_TYPE_CONTROL)) {
 			atomic_inc(&spi_errors);
 			LOG_WRN("Ignoring invalid SPI frame: magic=%02x version=%u type=%u",
 				spi_rx.magic, spi_rx.version, spi_rx.type);
+			continue;
+		}
+
+		if (spi_rx.type == LINK_TYPE_CONTROL) {
+			if (spi_rx.data[0] != LINK_CONTROL_SYSTEM_OFF) {
+				atomic_inc(&spi_errors);
+				LOG_WRN("Ignoring unknown control command: %u", spi_rx.data[0]);
+				continue;
+			}
+			transmitter_system_off();
 			continue;
 		}
 
