@@ -40,7 +40,7 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_ACK_TYPE_DFU       0x02U
 #define LINK_RF_CHANNEL         80U
 #define REPORT_QUEUE_DEPTH      128U
-#define REPORT_KEEPALIVE_MS     8
+#define REPORT_KEEPALIVE_MS     500U
 #define APP_TX_RETRY_COUNT      2U
 #define ESB_EVENT_TIMEOUT_US    2000
 #define WAKE_CSN_PIN            NRF_GPIO_PIN_MAP(0, 22)
