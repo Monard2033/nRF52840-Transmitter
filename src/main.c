@@ -24,13 +24,17 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 
 #define INPUT_DATA_SIZE         8U
 #define LINK_MAGIC              0xA5U
-#define LINK_VERSION            0x02U
+#define LINK_VERSION            0x03U
 #define LINK_TYPE_KEYBOARD      0x01U
 #define LINK_TYPE_CONSUMER      0x02U
 #define LINK_TYPE_CONTROL       0x03U
+#define LINK_TYPE_BATTERY       0x04U
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
+#define LINK_CONTROL_POLL_ACK   0x02U
+#define LINK_ACK_MAGIC           0x5AU
+#define LINK_ACK_TYPE_LOCK_STATE 0x01U
 #define LINK_RF_CHANNEL         80U
-#define REPORT_QUEUE_DEPTH      32U
+#define REPORT_QUEUE_DEPTH      128U
 #define REPORT_KEEPALIVE_MS     8
 #define APP_TX_RETRY_COUNT      2U
 #define ESB_EVENT_TIMEOUT_US    2000
@@ -45,6 +49,16 @@ struct link_input_packet {
 } __packed;
 
 BUILD_ASSERT(sizeof(struct link_input_packet) == 12U);
+
+struct link_ack_frame {
+	uint8_t magic;
+	uint8_t version;
+	uint8_t type;
+	uint8_t sequence;
+	uint8_t data[INPUT_DATA_SIZE];
+} __packed;
+
+BUILD_ASSERT(sizeof(struct link_ack_frame) == 12U);
 
 static const struct device *const spi_device =
 	DEVICE_DT_GET(DT_NODELABEL(spi1));
@@ -62,7 +76,18 @@ static K_SEM_DEFINE(esb_started, 0, 1);
 
 static struct esb_config esb_config = ESB_DEFAULT_CONFIG;
 static struct esb_payload esb_tx_payload;
+static struct esb_payload esb_rx_payload;
 static atomic_t esb_last_tx_succeeded;
+
+static struct k_spinlock spi_ack_lock;
+static struct link_ack_frame spi_ack_response = {
+	.magic = LINK_ACK_MAGIC,
+	.version = LINK_VERSION,
+};
+
+static struct k_spinlock battery_lock;
+static struct link_input_packet latest_battery_packet;
+static bool latest_battery_valid;
 
 static atomic_t spi_frames;
 static atomic_t spi_errors;
@@ -86,11 +111,57 @@ static void transmitter_esb_event_handler(const struct esb_evt *event)
 		k_sem_give(&esb_tx_done);
 		break;
 	case ESB_EVENT_RX_RECEIVED:
-		/* This application does not use acknowledgement payloads. */
+		while (esb_read_rx_payload(&esb_rx_payload) == 0) {
+			struct link_ack_frame ack;
+
+			if (esb_rx_payload.length != sizeof(ack)) {
+				continue;
+			}
+
+			memcpy(&ack, esb_rx_payload.data, sizeof(ack));
+			if (ack.magic != LINK_ACK_MAGIC ||
+			    ack.version != LINK_VERSION ||
+			    ack.type != LINK_ACK_TYPE_LOCK_STATE ||
+			    (ack.data[1] & 0x01U) == 0U) {
+				continue;
+			}
+
+			k_spinlock_key_t key = k_spin_lock(&spi_ack_lock);
+			spi_ack_response = ack;
+			k_spin_unlock(&spi_ack_lock, key);
+		}
 		break;
 	default:
 		break;
 	}
+}
+
+static void spi_ack_snapshot(struct link_ack_frame *output)
+{
+	k_spinlock_key_t key = k_spin_lock(&spi_ack_lock);
+	*output = spi_ack_response;
+	k_spin_unlock(&spi_ack_lock, key);
+}
+
+static void battery_store(const struct link_input_packet *packet)
+{
+	k_spinlock_key_t key = k_spin_lock(&battery_lock);
+	latest_battery_packet = *packet;
+	latest_battery_valid = true;
+	k_spin_unlock(&battery_lock, key);
+}
+
+static bool battery_take(struct link_input_packet *packet)
+{
+	k_spinlock_key_t key = k_spin_lock(&battery_lock);
+	bool const available = latest_battery_valid;
+
+	if (available) {
+		*packet = latest_battery_packet;
+		latest_battery_valid = false;
+	}
+	k_spin_unlock(&battery_lock, key);
+	return available;
 }
 
 static int esb_initialize(void)
@@ -204,6 +275,14 @@ static bool keyboard_packet_is_released(const struct link_input_packet *packet)
 	return memcmp(packet->data, released, sizeof(released)) == 0;
 }
 
+static bool battery_packet_is_valid(const struct link_input_packet *packet)
+{
+	return packet->data[0] <= 100U && packet->data[1] <= 4U &&
+	       (packet->data[5] & 0x01U) != 0U &&
+	       (packet->data[5] & 0xF0U) == 0U &&
+	       packet->data[6] == 0U && packet->data[7] == 0U;
+}
+
 static void transmitter_system_off(void)
 {
 	LOG_INF("Control request: entering System OFF; wake source is CSN/P0.22 LOW");
@@ -220,33 +299,65 @@ static void transmitter_system_off(void)
 static void radio_thread(void)
 {
 	struct link_input_packet packet;
+	bool packet_pending = false;
 	struct link_input_packet latest_keyboard;
 	bool latest_keyboard_valid = false;
 	bool keyboard_delivery_pending = false;
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
-		/* Consumer frames are transition-only. Keyboard keepalive runs only
-		 * while at least one normal key/modifier remains pressed. */
-		k_timeout_t const timeout = latest_keyboard_valid &&
-			(!keyboard_packet_is_released(&latest_keyboard) ||
-			 keyboard_delivery_pending) ?
-			K_MSEC(REPORT_KEEPALIVE_MS) : K_FOREVER;
-		if (k_msgq_get(&report_queue, &packet, timeout) == 0) {
-			if (packet.type == LINK_TYPE_KEYBOARD) {
-				latest_keyboard = packet;
-				latest_keyboard_valid = true;
-				keyboard_delivery_pending = true;
+		if (!packet_pending) {
+			/* Always drain ordered input before the latest-state battery slot. */
+			if (k_msgq_get(&report_queue, &packet, K_NO_WAIT) == 0) {
+				packet_pending = true;
+				if (packet.type == LINK_TYPE_KEYBOARD) {
+					latest_keyboard = packet;
+					latest_keyboard_valid = true;
+					keyboard_delivery_pending = true;
+				}
+			} else if (battery_take(&packet)) {
+				packet_pending = true;
+			} else {
+				/* Consumer frames are transition-only. Keyboard keepalive runs
+				 * only while a normal key/modifier remains pressed. */
+				k_timeout_t const timeout = latest_keyboard_valid &&
+					(!keyboard_packet_is_released(&latest_keyboard) ||
+					 keyboard_delivery_pending) ?
+					K_MSEC(REPORT_KEEPALIVE_MS) : K_FOREVER;
+				if (k_msgq_get(&report_queue, &packet, timeout) == 0) {
+					packet_pending = true;
+					if (packet.type == LINK_TYPE_KEYBOARD) {
+						latest_keyboard = packet;
+						latest_keyboard_valid = true;
+						keyboard_delivery_pending = true;
+					}
+				} else if (latest_keyboard_valid) {
+					packet = latest_keyboard;
+					packet_pending = true;
+					atomic_inc(&esb_link_probes);
+				} else {
+					continue;
+				}
 			}
-		} else {
-			packet = latest_keyboard;
-			atomic_inc(&esb_link_probes);
 		}
 
 		if (esb_send_packet(&packet) != 0) {
+			/* Keep the exact sequence/data pair pending. A Consumer release
+			 * must not disappear merely because one ESB transaction failed.
+			 * Battery is low priority and yields to newly arrived input. */
+			if (packet.type == LINK_TYPE_BATTERY) {
+				battery_store(&packet);
+				packet_pending = false;
+				k_busy_wait(100);
+			}
 			LOG_WRN_RATELIMIT("Report was not acknowledged");
-		} else if (packet.type == LINK_TYPE_KEYBOARD) {
-			keyboard_delivery_pending = false;
+		} else {
+			if (packet.type == LINK_TYPE_KEYBOARD &&
+				latest_keyboard_valid &&
+				packet.sequence == latest_keyboard.sequence) {
+				keyboard_delivery_pending = false;
+			}
+			packet_pending = false;
 		}
 	}
 }
@@ -285,6 +396,7 @@ K_THREAD_DEFINE(status_thread_id, 1024, status_thread,
 int main(void)
 {
 	struct link_input_packet spi_rx __aligned(sizeof(uint32_t));
+	struct link_ack_frame spi_tx __aligned(sizeof(uint32_t));
 	struct link_input_packet last_spi_keyboard;
 	bool last_spi_keyboard_valid = false;
 	int err;
@@ -308,6 +420,16 @@ int main(void)
 		spi_device->name, LINK_RF_CHANNEL);
 
 	for (;;) {
+		spi_ack_snapshot(&spi_tx);
+
+		struct spi_buf tx_buffer = {
+			.buf = &spi_tx,
+			.len = sizeof(spi_tx),
+		};
+		const struct spi_buf_set tx = {
+			.buffers = &tx_buffer,
+			.count = 1,
+		};
 		struct spi_buf rx_buffer = {
 			.buf = &spi_rx,
 			.len = sizeof(spi_rx),
@@ -318,7 +440,7 @@ int main(void)
 		};
 
 		memset(&spi_rx, 0, sizeof(spi_rx));
-		err = spi_transceive(spi_device, &spi_config, NULL, &rx);
+		err = spi_transceive(spi_device, &spi_config, &tx, &rx);
 		if (err < 0) {
 			atomic_inc(&spi_errors);
 			LOG_ERR("SPI slave transfer failed: %d", err);
@@ -341,7 +463,8 @@ int main(void)
 		if (spi_rx.magic != LINK_MAGIC || spi_rx.version != LINK_VERSION ||
 		    (spi_rx.type != LINK_TYPE_KEYBOARD &&
 		     spi_rx.type != LINK_TYPE_CONSUMER &&
-		     spi_rx.type != LINK_TYPE_CONTROL)) {
+		     spi_rx.type != LINK_TYPE_CONTROL &&
+		     spi_rx.type != LINK_TYPE_BATTERY)) {
 			atomic_inc(&spi_errors);
 			LOG_WRN("Ignoring invalid SPI frame: magic=%02x version=%u type=%u",
 				spi_rx.magic, spi_rx.version, spi_rx.type);
@@ -349,6 +472,12 @@ int main(void)
 		}
 
 		if (spi_rx.type == LINK_TYPE_CONTROL) {
+			if (spi_rx.data[0] == LINK_CONTROL_POLL_ACK) {
+				/* Forward the low-rate reverse-channel poll so the Receiver can
+				 * return the latest Windows LED state in the ESB ACK payload. */
+				(void)queue_packet(&spi_rx);
+				continue;
+			}
 			if (spi_rx.data[0] != LINK_CONTROL_SYSTEM_OFF) {
 				atomic_inc(&spi_errors);
 				LOG_WRN("Ignoring unknown control command: %u", spi_rx.data[0]);
@@ -368,6 +497,16 @@ int main(void)
 				last_spi_keyboard = spi_rx;
 				last_spi_keyboard_valid = true;
 			}
+			continue;
+		}
+
+		if (spi_rx.type == LINK_TYPE_BATTERY) {
+			if (!battery_packet_is_valid(&spi_rx)) {
+				atomic_inc(&spi_errors);
+				LOG_WRN("Ignoring invalid battery frame");
+				continue;
+			}
+			battery_store(&spi_rx);
 			continue;
 		}
 
