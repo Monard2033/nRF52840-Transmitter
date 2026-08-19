@@ -29,13 +29,18 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_TYPE_CONSUMER      0x02U
 #define LINK_TYPE_CONTROL       0x03U
 #define LINK_TYPE_BATTERY       0x04U
+#define LINK_TYPE_DFU_START     0x10U
+#define LINK_TYPE_DFU_DATA      0x11U
+#define LINK_TYPE_DFU_FINISH    0x12U
+#define LINK_TYPE_DFU_STATUS    0x13U
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_CONTROL_POLL_ACK   0x02U
 #define LINK_ACK_MAGIC           0x5AU
 #define LINK_ACK_TYPE_LOCK_STATE 0x01U
+#define LINK_ACK_TYPE_DFU       0x02U
 #define LINK_RF_CHANNEL         80U
 #define REPORT_QUEUE_DEPTH      128U
-#define REPORT_KEEPALIVE_MS     8
+#define REPORT_KEEPALIVE_MS     500U
 #define APP_TX_RETRY_COUNT      2U
 #define ESB_EVENT_TIMEOUT_US    2000
 #define WAKE_CSN_PIN            NRF_GPIO_PIN_MAP(0, 22)
@@ -120,8 +125,11 @@ static void transmitter_esb_event_handler(const struct esb_evt *event)
 
 			memcpy(&ack, esb_rx_payload.data, sizeof(ack));
 			if (ack.magic != LINK_ACK_MAGIC ||
-			    ack.version != LINK_VERSION ||
-			    ack.type != LINK_ACK_TYPE_LOCK_STATE ||
+			    ack.version != LINK_VERSION) {
+				continue;
+			}
+
+			if (ack.type == LINK_ACK_TYPE_LOCK_STATE &&
 			    (ack.data[1] & 0x01U) == 0U) {
 				continue;
 			}
@@ -464,7 +472,8 @@ int main(void)
 		    (spi_rx.type != LINK_TYPE_KEYBOARD &&
 		     spi_rx.type != LINK_TYPE_CONSUMER &&
 		     spi_rx.type != LINK_TYPE_CONTROL &&
-		     spi_rx.type != LINK_TYPE_BATTERY)) {
+		     spi_rx.type != LINK_TYPE_BATTERY &&
+		     spi_rx.type != LINK_TYPE_DFU_STATUS)) {
 			atomic_inc(&spi_errors);
 			LOG_WRN("Ignoring invalid SPI frame: magic=%02x version=%u type=%u",
 				spi_rx.magic, spi_rx.version, spi_rx.type);
