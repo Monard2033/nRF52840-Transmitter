@@ -19,9 +19,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
-#include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/util.h>
-#include <hal/nrf_gpio.h>
 
 LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 
@@ -30,16 +28,9 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_FRAME_SIZE      12U
 #define LINK_ACK_MAGIC       0x5AU
 #define LINK_RF_CHANNEL      80U
-#define LINK_TYPE_KEYBOARD   0x01U
-#define LINK_TYPE_CONSUMER   0x02U
-#define LINK_TYPE_CONTROL    0x03U
-#define LINK_TYPE_BATTERY    0x04U
-#define LINK_CONTROL_SYSTEM_OFF 0x01U
-#define LINK_CONTROL_SPI_POLL   0x03U
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 2000U
 #define RETRY_BACKOFF_US     100U
-#define WAKE_CSN_PIN         NRF_GPIO_PIN_MAP(0, 22)
 
 struct link_frame {
 	uint8_t magic;
@@ -64,7 +55,6 @@ K_MSGQ_DEFINE(report_queue, sizeof(struct link_frame), REPORT_QUEUE_DEPTH,
 	      sizeof(uint32_t));
 static K_SEM_DEFINE(esb_tx_done, 0, 1);
 static K_SEM_DEFINE(esb_started, 0, 1);
-static K_SEM_DEFINE(bridge_wake, 0, 1);
 
 static struct esb_config esb_config = ESB_DEFAULT_CONFIG;
 static struct esb_payload esb_tx_payload;
@@ -76,10 +66,6 @@ static struct link_frame spi_ack_response = {
 	.magic = LINK_ACK_MAGIC,
 	.version = LINK_VERSION,
 };
-
-static struct k_spinlock battery_lock;
-static struct link_frame latest_battery;
-static bool latest_battery_valid;
 
 static atomic_t spi_frames;
 static atomic_t spi_errors;
@@ -166,43 +152,6 @@ static int esb_initialize(void)
 	return esb_set_rf_channel(LINK_RF_CHANNEL);
 }
 
-static void battery_store(const struct link_frame *frame)
-{
-	k_spinlock_key_t key = k_spin_lock(&battery_lock);
-	latest_battery = *frame;
-	latest_battery_valid = true;
-	k_spin_unlock(&battery_lock, key);
-	k_sem_give(&bridge_wake);
-}
-
-static bool battery_take(struct link_frame *frame)
-{
-	k_spinlock_key_t key = k_spin_lock(&battery_lock);
-	bool const available = latest_battery_valid;
-	if (available) {
-		*frame = latest_battery;
-		latest_battery_valid = false;
-	}
-	k_spin_unlock(&battery_lock, key);
-	return available;
-}
-
-static bool battery_frame_is_valid(const struct link_frame *frame)
-{
-	return frame->data[0] <= 100U && frame->data[1] <= 4U &&
-	       (frame->data[5] & 0x01U) != 0U &&
-	       (frame->data[5] & 0xF0U) == 0U &&
-	       frame->data[6] == 0U && frame->data[7] == 0U;
-}
-
-static void transmitter_system_off(void)
-{
-	esb_disable();
-	nrf_gpio_cfg_sense_input(WAKE_CSN_PIN, NRF_GPIO_PIN_PULLUP,
-				 NRF_GPIO_PIN_SENSE_LOW);
-	sys_poweroff();
-}
-
 static int esb_send_once(const struct link_frame *frame)
 {
 	k_sem_reset(&esb_tx_done);
@@ -232,13 +181,7 @@ static void radio_thread(void)
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
-		if (k_msgq_get(&report_queue, &frame, K_NO_WAIT) == 0) {
-		} else if (battery_take(&frame)) {
-			/* Latest-state low-priority telemetry slot. */
-		} else {
-			(void)k_sem_take(&bridge_wake, K_FOREVER);
-			continue;
-		}
+		k_msgq_get(&report_queue, &frame, K_FOREVER);
 
 		/* Do not dequeue the next SPI report until this exact frame received
 		 * a hardware ESB ACK. This preserves order including key releases. */
@@ -311,41 +254,16 @@ int main(void)
 			continue;
 		}
 		if (spi_rx.magic != LINK_MAGIC ||
-		    spi_rx.version != LINK_VERSION ||
-		    (spi_rx.type != LINK_TYPE_KEYBOARD &&
-		     spi_rx.type != LINK_TYPE_CONSUMER &&
-		     spi_rx.type != LINK_TYPE_CONTROL &&
-		     spi_rx.type != LINK_TYPE_BATTERY)) {
+		    spi_rx.version != LINK_VERSION) {
 			atomic_inc(&spi_errors);
 			continue;
 		}
 
 		atomic_inc(&spi_frames);
-		if (spi_rx.type == LINK_TYPE_CONTROL &&
-		    spi_rx.data[0] == LINK_CONTROL_SYSTEM_OFF) {
-			transmitter_system_off();
-			continue;
-		}
-		if (spi_rx.type == LINK_TYPE_CONTROL &&
-		    spi_rx.data[0] == LINK_CONTROL_SPI_POLL) {
-			/* Wired clock-only transaction: return cached ESB ACK on MISO,
-			 * but never create an autonomous/on-air control packet. */
-			continue;
-		}
-		if (spi_rx.type == LINK_TYPE_BATTERY) {
-			if (battery_frame_is_valid(&spi_rx)) {
-				battery_store(&spi_rx);
-			} else {
-				atomic_inc(&spi_errors);
-			}
-			continue;
-		}
 		if (k_msgq_put(&report_queue, &spi_rx, K_NO_WAIT) != 0) {
 			/* No semantic replacement/deduplication is allowed here. The
 			 * counter makes any impossible sustained overload observable. */
 			atomic_inc(&report_queue_overruns);
-		} else {
-			k_sem_give(&bridge_wake);
 		}
 	}
 }
