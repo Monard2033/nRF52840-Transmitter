@@ -20,6 +20,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/util.h>
 
 LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
@@ -27,6 +28,8 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_MAGIC           0xA5U
 #define LINK_VERSION         0x03U
 #define LINK_FRAME_SIZE      12U
+#define LINK_TYPE_CONTROL    0x03U
+#define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_ACK_MAGIC       0x5AU
 #define LINK_RF_CHANNEL      80U
 #define REPORT_QUEUE_DEPTH   256U
@@ -53,6 +56,7 @@ K_MSGQ_DEFINE(report_queue, sizeof(struct link_frame), REPORT_QUEUE_DEPTH,
 	      sizeof(uint32_t));
 static K_SEM_DEFINE(esb_tx_done, 0, 1);
 static K_SEM_DEFINE(esb_started, 0, 1);
+static K_SEM_DEFINE(poweroff_requested, 0, 1);
 
 static struct esb_config esb_config = ESB_DEFAULT_CONFIG;
 static struct esb_payload esb_tx_payload;
@@ -73,6 +77,8 @@ static atomic_t report_queue_overruns;
 static atomic_t esb_tx_successes;
 static atomic_t esb_tx_failures;
 static atomic_t esb_tx_timeouts;
+static atomic_t radio_frame_in_flight;
+static atomic_t poweroff_pending;
 
 static nrfx_spis_t spis_instance = NRFX_SPIS_INSTANCE(NRF_SPIS1);
 static struct link_frame spis_rx_buffers[SPIS_BUFFER_COUNT]
@@ -184,6 +190,15 @@ static void spis_event_handler(nrfx_spis_event_t const *event,
 		atomic_inc(&spi_duplicates);
 		return;
 	}
+	if (frame.type == LINK_TYPE_CONTROL &&
+	    frame.data[0] == LINK_CONTROL_SYSTEM_OFF) {
+		last_spi_frame = frame;
+		last_spi_frame_valid = true;
+		atomic_inc(&spi_frames);
+		atomic_set(&poweroff_pending, 1);
+		k_sem_give(&poweroff_requested);
+		return;
+	}
 
 	if (k_msgq_put(&report_queue, &frame, K_NO_WAIT) != 0) {
 		atomic_inc(&report_queue_overruns);
@@ -282,12 +297,14 @@ static void radio_thread(void)
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
 		k_msgq_get(&report_queue, &frame, K_FOREVER);
+		atomic_set(&radio_frame_in_flight, 1);
 
 		/* Do not dequeue the next SPI report until this exact frame received
 		 * a hardware ESB ACK. This preserves order including key releases. */
 		while (esb_send_once(&frame) != 0) {
 			k_busy_wait(RETRY_BACKOFF_US);
 		}
+		atomic_set(&radio_frame_in_flight, 0);
 	}
 }
 
@@ -324,6 +341,24 @@ int main(void)
 	k_sem_give(&esb_started);
 
 	for (;;) {
-		k_sleep(K_FOREVER);
+		k_sem_take(&poweroff_requested, K_FOREVER);
+		if (atomic_get(&poweroff_pending) == 0) {
+			continue;
+		}
+
+		/* Give RP2040's same-sequence SPI safety copy time to complete, then
+		 * wait only for already-accepted urgent ESB traffic. */
+		k_sleep(K_MSEC(2));
+		while (k_msgq_num_used_get(&report_queue) != 0U ||
+		       atomic_get(&radio_frame_in_flight) != 0) {
+			k_sleep(K_MSEC(1));
+		}
+
+		esb_disable();
+		nrfx_spis_uninit(&spis_instance);
+		nrf_gpio_cfg_sense_input(SPIS_CSN_PIN,
+					 NRF_GPIO_PIN_PULLUP,
+					 NRF_GPIO_PIN_SENSE_LOW);
+		sys_poweroff();
 	}
 }
