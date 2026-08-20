@@ -283,6 +283,11 @@ static bool keyboard_packet_is_released(const struct link_input_packet *packet)
 	return memcmp(packet->data, released, sizeof(released)) == 0;
 }
 
+static bool consumer_packet_is_released(const struct link_input_packet *packet)
+{
+	return packet->data[0] == 0U && packet->data[1] == 0U;
+}
+
 static bool battery_packet_is_valid(const struct link_input_packet *packet)
 {
 	return packet->data[0] <= 100U && packet->data[1] <= 4U &&
@@ -311,6 +316,9 @@ static void radio_thread(void)
 	struct link_input_packet latest_keyboard;
 	bool latest_keyboard_valid = false;
 	bool keyboard_delivery_pending = false;
+	struct link_input_packet latest_consumer;
+	bool latest_consumer_valid = false;
+	bool consumer_delivery_pending = false;
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
@@ -322,24 +330,39 @@ static void radio_thread(void)
 					latest_keyboard = packet;
 					latest_keyboard_valid = true;
 					keyboard_delivery_pending = true;
+				} else if (packet.type == LINK_TYPE_CONSUMER) {
+					latest_consumer = packet;
+					latest_consumer_valid = true;
+					consumer_delivery_pending = true;
 				}
 			} else if (battery_take(&packet)) {
 				packet_pending = true;
 			} else {
-				/* Consumer frames are transition-only. Keyboard keepalive runs
-				 * only while a normal key/modifier remains pressed. */
-				k_timeout_t const timeout = latest_keyboard_valid &&
+				bool const kbd_active = latest_keyboard_valid &&
 					(!keyboard_packet_is_released(&latest_keyboard) ||
-					 keyboard_delivery_pending) ?
+					 keyboard_delivery_pending);
+				bool const consumer_active = latest_consumer_valid &&
+					(!consumer_packet_is_released(&latest_consumer) ||
+					 consumer_delivery_pending);
+				k_timeout_t const timeout = (kbd_active || consumer_active) ?
 					K_MSEC(REPORT_KEEPALIVE_MS) : K_FOREVER;
+
 				if (k_msgq_get(&report_queue, &packet, timeout) == 0) {
 					packet_pending = true;
 					if (packet.type == LINK_TYPE_KEYBOARD) {
 						latest_keyboard = packet;
 						latest_keyboard_valid = true;
 						keyboard_delivery_pending = true;
+					} else if (packet.type == LINK_TYPE_CONSUMER) {
+						latest_consumer = packet;
+						latest_consumer_valid = true;
+						consumer_delivery_pending = true;
 					}
-				} else if (latest_keyboard_valid) {
+				} else if (consumer_active) {
+					packet = latest_consumer;
+					packet_pending = true;
+					atomic_inc(&esb_link_probes);
+				} else if (kbd_active) {
 					packet = latest_keyboard;
 					packet_pending = true;
 					atomic_inc(&esb_link_probes);
@@ -350,9 +373,6 @@ static void radio_thread(void)
 		}
 
 		if (esb_send_packet(&packet) != 0) {
-			/* Keep the exact sequence/data pair pending. A Consumer release
-			 * must not disappear merely because one ESB transaction failed.
-			 * Battery is low priority and yields to newly arrived input. */
 			if (packet.type == LINK_TYPE_BATTERY) {
 				battery_store(&packet);
 				packet_pending = false;
@@ -364,6 +384,10 @@ static void radio_thread(void)
 				latest_keyboard_valid &&
 				packet.sequence == latest_keyboard.sequence) {
 				keyboard_delivery_pending = false;
+			} else if (packet.type == LINK_TYPE_CONSUMER &&
+				latest_consumer_valid &&
+				packet.sequence == latest_consumer.sequence) {
+				consumer_delivery_pending = false;
 			}
 			packet_pending = false;
 		}
