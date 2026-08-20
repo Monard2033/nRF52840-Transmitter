@@ -68,6 +68,7 @@ static struct link_frame spi_ack_response = {
 static atomic_t spi_frames;
 static atomic_t spi_errors;
 static atomic_t spi_rearm_errors;
+static atomic_t spi_duplicates;
 static atomic_t report_queue_overruns;
 static atomic_t esb_tx_successes;
 static atomic_t esb_tx_failures;
@@ -78,6 +79,8 @@ static struct link_frame spis_rx_buffers[SPIS_BUFFER_COUNT]
 	__aligned(sizeof(uint32_t));
 static struct link_frame spis_tx_buffers[SPIS_BUFFER_COUNT]
 	__aligned(sizeof(uint32_t));
+static struct link_frame last_spi_frame;
+static bool last_spi_frame_valid;
 
 static void transmitter_esb_event_handler(const struct esb_evt *event)
 {
@@ -174,11 +177,21 @@ static void spis_event_handler(nrfx_spis_event_t const *event,
 		atomic_inc(&spi_errors);
 		return;
 	}
+	if (last_spi_frame_valid &&
+	    memcmp(&frame, &last_spi_frame, sizeof(frame)) == 0) {
+		/* RP2040 sends one transport-level safety copy with the same
+		 * sequence. Suppress it before ESB; HID semantics remain untouched. */
+		atomic_inc(&spi_duplicates);
+		return;
+	}
 
-	atomic_inc(&spi_frames);
 	if (k_msgq_put(&report_queue, &frame, K_NO_WAIT) != 0) {
 		atomic_inc(&report_queue_overruns);
+		return;
 	}
+	last_spi_frame = frame;
+	last_spi_frame_valid = true;
+	atomic_inc(&spi_frames);
 }
 
 static int spis_initialize(void)
@@ -286,10 +299,11 @@ static void status_thread(void)
 {
 	for (;;) {
 		k_sleep(K_SECONDS(5));
-		LOG_INF("SPI=%ld err=%ld rearm_err=%ld queue_full=%ld ESB_ok=%ld fail=%ld timeout=%ld",
+		LOG_INF("SPI=%ld err=%ld rearm_err=%ld duplicates=%ld queue_full=%ld ESB_ok=%ld fail=%ld timeout=%ld",
 			(long)atomic_get(&spi_frames),
 			(long)atomic_get(&spi_errors),
 			(long)atomic_get(&spi_rearm_errors),
+			(long)atomic_get(&spi_duplicates),
 			(long)atomic_get(&report_queue_overruns),
 			(long)atomic_get(&esb_tx_successes),
 			(long)atomic_get(&esb_tx_failures),
