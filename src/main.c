@@ -37,7 +37,6 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_CONTROL_SPI_POLL   0x03U
 #define REPORT_QUEUE_DEPTH   256U
-#define REPORT_KEEPALIVE_MS  500U
 #define ESB_EVENT_TIMEOUT_US 2000U
 #define RETRY_BACKOFF_US     100U
 #define WAKE_CSN_PIN         NRF_GPIO_PIN_MAP(0, 22)
@@ -65,6 +64,7 @@ K_MSGQ_DEFINE(report_queue, sizeof(struct link_frame), REPORT_QUEUE_DEPTH,
 	      sizeof(uint32_t));
 static K_SEM_DEFINE(esb_tx_done, 0, 1);
 static K_SEM_DEFINE(esb_started, 0, 1);
+static K_SEM_DEFINE(bridge_wake, 0, 1);
 
 static struct esb_config esb_config = ESB_DEFAULT_CONFIG;
 static struct esb_payload esb_tx_payload;
@@ -87,7 +87,6 @@ static atomic_t report_queue_overruns;
 static atomic_t esb_tx_successes;
 static atomic_t esb_tx_failures;
 static atomic_t esb_tx_timeouts;
-static atomic_t esb_keepalives;
 
 static void transmitter_esb_event_handler(const struct esb_evt *event)
 {
@@ -173,6 +172,7 @@ static void battery_store(const struct link_frame *frame)
 	latest_battery = *frame;
 	latest_battery_valid = true;
 	k_spin_unlock(&battery_lock, key);
+	k_sem_give(&bridge_wake);
 }
 
 static bool battery_take(struct link_frame *frame)
@@ -229,34 +229,15 @@ static int esb_send_once(const struct link_frame *frame)
 static void radio_thread(void)
 {
 	struct link_frame frame;
-	struct link_frame latest_keyboard;
-	bool latest_keyboard_valid = false;
 
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
 		if (k_msgq_get(&report_queue, &frame, K_NO_WAIT) == 0) {
-			if (frame.type == LINK_TYPE_KEYBOARD) {
-				latest_keyboard = frame;
-				latest_keyboard_valid = true;
-			}
 		} else if (battery_take(&frame)) {
 			/* Latest-state low-priority telemetry slot. */
-		} else if (latest_keyboard_valid) {
-			if (k_msgq_get(&report_queue, &frame,
-					  K_MSEC(REPORT_KEEPALIVE_MS)) == 0) {
-				if (frame.type == LINK_TYPE_KEYBOARD) {
-					latest_keyboard = frame;
-				}
-			} else {
-				frame = latest_keyboard;
-				atomic_inc(&esb_keepalives);
-			}
 		} else {
-			k_msgq_get(&report_queue, &frame, K_FOREVER);
-			if (frame.type == LINK_TYPE_KEYBOARD) {
-				latest_keyboard = frame;
-				latest_keyboard_valid = true;
-			}
+			(void)k_sem_take(&bridge_wake, K_FOREVER);
+			continue;
 		}
 
 		/* Do not dequeue the next SPI report until this exact frame received
@@ -275,11 +256,10 @@ static void status_thread(void)
 {
 	for (;;) {
 		k_sleep(K_SECONDS(5));
-		LOG_INF("SPI=%ld err=%ld queue_full=%ld keepalive=%ld ESB_ok=%ld fail=%ld timeout=%ld",
+		LOG_INF("SPI=%ld err=%ld queue_full=%ld ESB_ok=%ld fail=%ld timeout=%ld",
 			(long)atomic_get(&spi_frames),
 			(long)atomic_get(&spi_errors),
 			(long)atomic_get(&report_queue_overruns),
-			(long)atomic_get(&esb_keepalives),
 			(long)atomic_get(&esb_tx_successes),
 			(long)atomic_get(&esb_tx_failures),
 			(long)atomic_get(&esb_tx_timeouts));
@@ -364,6 +344,8 @@ int main(void)
 			/* No semantic replacement/deduplication is allowed here. The
 			 * counter makes any impossible sustained overload observable. */
 			atomic_inc(&report_queue_overruns);
+		} else {
+			k_sem_give(&bridge_wake);
 		}
 	}
 }
