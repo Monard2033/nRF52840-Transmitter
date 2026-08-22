@@ -5,18 +5,21 @@
  * Minimal transparent bridge:
  *   complete 12-byte SPI frame -> unchanged ESB frame -> hardware ACK.
  *
- * This component does not interpret HID state, deduplicate reports, generate
- * keepalives, rewrite sequence numbers, or create autonomous radio traffic.
+ * The SPI slave layer uses the Zephyr spi_transceive driver with a fresh
+ * reverse-ACK snapshot armed before every transaction. This is the reverse
+ * (MISO) mechanism hardware-proven during the August 19 OTA sessions; the
+ * direct-nrfx double-buffered rewrite never clocked a single byte onto MISO
+ * (see the RP2040 [MISO] witness capture, 2026-08-22).
  */
 
 #include <errno.h>
 #include <string.h>
 
 #include <esb.h>
-#include <nrfx.h>
-#include <nrfx_spis.h>
 #include <hal/nrf_gpio.h>
-#include <zephyr/irq.h>
+#include <nrfx.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
@@ -30,17 +33,12 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_FRAME_SIZE      12U
 #define LINK_TYPE_CONTROL    0x03U
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
+#define LINK_CONTROL_POLL_ACK   0x02U
 #define LINK_ACK_MAGIC       0x5AU
 #define LINK_RF_CHANNEL      80U
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 2000U
 #define RETRY_BACKOFF_US     100U
-#define SPIS_IRQ_PRIORITY    1U
-#define SPIS_SCK_PIN         NRF_GPIO_PIN_MAP(0, 17)
-#define SPIS_MOSI_PIN        NRF_GPIO_PIN_MAP(0, 20)
-#define SPIS_MISO_PIN        NRF_GPIO_PIN_MAP(0, 8)
-#define SPIS_CSN_PIN         NRF_GPIO_PIN_MAP(0, 22)
-#define SPIS_BUFFER_COUNT    2U
 
 struct link_frame {
 	uint8_t magic;
@@ -71,7 +69,6 @@ static struct link_frame spi_ack_response = {
 
 static atomic_t spi_frames;
 static atomic_t spi_errors;
-static atomic_t spi_rearm_errors;
 static atomic_t spi_duplicates;
 static atomic_t report_queue_overruns;
 static atomic_t esb_tx_successes;
@@ -80,13 +77,14 @@ static atomic_t esb_tx_timeouts;
 static atomic_t radio_frame_in_flight;
 static atomic_t poweroff_pending;
 
-static nrfx_spis_t spis_instance = NRFX_SPIS_INSTANCE(NRF_SPIS1);
-static struct link_frame spis_rx_buffers[SPIS_BUFFER_COUNT]
-	__aligned(sizeof(uint32_t));
-static struct link_frame spis_tx_buffers[SPIS_BUFFER_COUNT]
-	__aligned(sizeof(uint32_t));
 static struct link_frame last_spi_frame;
 static bool last_spi_frame_valid;
+
+static const struct device *const spi_device = DEVICE_DT_GET(DT_NODELABEL(spi1));
+static const struct spi_config spi_slave_config = {
+	.operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
+	.slave = 0,
+};
 
 static void transmitter_esb_event_handler(const struct esb_evt *event)
 {
@@ -108,6 +106,7 @@ static void transmitter_esb_event_handler(const struct esb_evt *event)
 			if (esb_rx_payload.length != sizeof(ack)) {
 				continue;
 			}
+
 			memcpy(&ack, esb_rx_payload.data, sizeof(ack));
 			if (ack.magic != LINK_ACK_MAGIC ||
 			    ack.version != LINK_VERSION) {
@@ -115,7 +114,7 @@ static void transmitter_esb_event_handler(const struct esb_evt *event)
 			}
 
 			k_spinlock_key_t key = k_spin_lock(&spi_ack_lock);
-			spi_ack_response = ack;
+			memcpy(&spi_ack_response, &ack, sizeof(ack));
 			k_spin_unlock(&spi_ack_lock, key);
 		}
 		break;
@@ -127,109 +126,8 @@ static void transmitter_esb_event_handler(const struct esb_evt *event)
 static void spi_ack_snapshot(struct link_frame *output)
 {
 	k_spinlock_key_t key = k_spin_lock(&spi_ack_lock);
-	*output = spi_ack_response;
+	memcpy(output, &spi_ack_response, sizeof(*output));
 	k_spin_unlock(&spi_ack_lock, key);
-}
-
-static int spis_arm_buffer(uint8_t index)
-{
-	memset(&spis_rx_buffers[index], 0, sizeof(spis_rx_buffers[index]));
-	return nrfx_spis_buffers_set(&spis_instance,
-		(uint8_t const *)&spis_tx_buffers[index],
-		sizeof(spis_tx_buffers[index]),
-		(uint8_t *)&spis_rx_buffers[index],
-		sizeof(spis_rx_buffers[index]));
-}
-
-static void spis_event_handler(nrfx_spis_event_t const *event,
-			       void *context)
-{
-	ARG_UNUSED(context);
-
-	if (event->evt_type != NRFX_SPIS_XFER_DONE) {
-		return;
-	}
-
-	uint8_t completed_index;
-	if (event->p_rx_buf == &spis_rx_buffers[0]) {
-		completed_index = 0U;
-	} else if (event->p_rx_buf == &spis_rx_buffers[1]) {
-		completed_index = 1U;
-	} else {
-		atomic_inc(&spi_errors);
-		return;
-	}
-
-	/* Rearm EasyDMA first, directly from the SPIS IRQ. Validation, queueing
-	 * and radio work happen only after the other buffer is already requested. */
-	uint8_t const next_index = completed_index ^ 1U;
-	if (spis_arm_buffer(next_index) != 0) {
-		atomic_inc(&spi_rearm_errors);
-	}
-
-	/* Refresh the completed slot's reverse status while the other slot owns
-	 * the next transaction. A slightly stale LED status is safe; an unarmed
-	 * keyboard input transaction is not. */
-	spi_ack_snapshot(&spis_tx_buffers[completed_index]);
-
-	if (event->rx_amount != sizeof(struct link_frame)) {
-		atomic_inc(&spi_errors);
-		return;
-	}
-
-	struct link_frame frame;
-	memcpy(&frame, event->p_rx_buf, sizeof(frame));
-	if (frame.magic != LINK_MAGIC || frame.version != LINK_VERSION) {
-		atomic_inc(&spi_errors);
-		return;
-	}
-	if (last_spi_frame_valid &&
-	    memcmp(&frame, &last_spi_frame, sizeof(frame)) == 0) {
-		/* RP2040 sends one transport-level safety copy with the same
-		 * sequence. Suppress it before ESB; HID semantics remain untouched. */
-		atomic_inc(&spi_duplicates);
-		return;
-	}
-	if (frame.type == LINK_TYPE_CONTROL &&
-	    frame.data[0] == LINK_CONTROL_SYSTEM_OFF) {
-		last_spi_frame = frame;
-		last_spi_frame_valid = true;
-		atomic_inc(&spi_frames);
-		atomic_set(&poweroff_pending, 1);
-		k_sem_give(&poweroff_requested);
-		return;
-	}
-
-	if (k_msgq_put(&report_queue, &frame, K_NO_WAIT) != 0) {
-		atomic_inc(&report_queue_overruns);
-		return;
-	}
-	last_spi_frame = frame;
-	last_spi_frame_valid = true;
-	atomic_inc(&spi_frames);
-}
-
-static int spis_initialize(void)
-{
-	IRQ_CONNECT(NRFX_IRQ_NUMBER_GET(NRF_SPIS1), SPIS_IRQ_PRIORITY,
-		    nrfx_spis_irq_handler, &spis_instance, 0);
-
-	nrfx_spis_config_t config = NRFX_SPIS_DEFAULT_CONFIG(
-		SPIS_SCK_PIN, SPIS_MOSI_PIN, SPIS_MISO_PIN, SPIS_CSN_PIN);
-	config.irq_priority = SPIS_IRQ_PRIORITY;
-	config.def = 0x00U;
-	config.orc = 0x00U;
-
-	int err = nrfx_spis_init(&spis_instance, &config,
-				 spis_event_handler, NULL);
-	if (err != 0) {
-		return err;
-	}
-
-	for (uint8_t i = 0U; i < SPIS_BUFFER_COUNT; ++i) {
-		spi_ack_snapshot(&spis_tx_buffers[i]);
-	}
-	return spis_arm_buffer(0U);
 }
 
 static int esb_initialize(void)
@@ -311,15 +209,94 @@ static void radio_thread(void)
 K_THREAD_DEFINE(radio_thread_id, 1536, radio_thread,
 		NULL, NULL, NULL, 5, 0, 0);
 
+/* SPI slave thread: one blocking transaction at a time, arming a FRESH
+ * reverse-ACK snapshot before each one so the RP2040 reads the newest LED
+ * or DFU state on the very next transfer. This mirrors the hardware-proven
+ * August 19 mechanism. */
+static void spi_slave_thread(void)
+{
+	struct link_frame spi_tx;
+	struct link_frame spi_rx;
+
+	for (;;) {
+		spi_ack_snapshot(&spi_tx);
+
+		struct spi_buf tx_buffer = {
+			.buf = &spi_tx,
+			.len = sizeof(spi_tx),
+		};
+		const struct spi_buf_set tx = {
+			.buffers = &tx_buffer,
+			.count = 1,
+		};
+		struct spi_buf rx_buffer = {
+			.buf = &spi_rx,
+			.len = sizeof(spi_rx),
+		};
+		const struct spi_buf_set rx = {
+			.buffers = &rx_buffer,
+			.count = 1,
+		};
+
+		memset(&spi_rx, 0, sizeof(spi_rx));
+		int err = spi_transceive(spi_device, &spi_slave_config, &tx, &rx);
+		if (err < 0) {
+			atomic_inc(&spi_errors);
+			k_msleep(1);
+			continue;
+		}
+
+		/* Zephyr slave mode returns the number of received 8-bit frames. */
+		if (err != sizeof(spi_rx)) {
+			atomic_inc(&spi_errors);
+			continue;
+		}
+
+		if (spi_rx.magic != LINK_MAGIC ||
+		    spi_rx.version != LINK_VERSION) {
+			atomic_inc(&spi_errors);
+			continue;
+		}
+
+		if (last_spi_frame_valid &&
+		    memcmp(&spi_rx, &last_spi_frame, sizeof(spi_rx)) == 0) {
+			/* RP2040 safety copy with the same sequence: suppress
+			 * before ESB; HID semantics remain untouched. */
+			atomic_inc(&spi_duplicates);
+			continue;
+		}
+
+		if (spi_rx.type == LINK_TYPE_CONTROL &&
+		    spi_rx.data[0] == LINK_CONTROL_SYSTEM_OFF) {
+			memcpy(&last_spi_frame, &spi_rx, sizeof(spi_rx));
+			last_spi_frame_valid = true;
+			atomic_inc(&spi_frames);
+			atomic_set(&poweroff_pending, 1);
+			k_sem_give(&poweroff_requested);
+			continue;
+		}
+
+		if (k_msgq_put(&report_queue, &spi_rx, K_NO_WAIT) != 0) {
+			atomic_inc(&report_queue_overruns);
+			continue;
+		}
+		memcpy(&last_spi_frame, &spi_rx, sizeof(spi_rx));
+		last_spi_frame_valid = true;
+		atomic_inc(&spi_frames);
+	}
+}
+
+K_THREAD_DEFINE(spi_slave_thread_id, 2048, spi_slave_thread,
+		NULL, NULL, NULL, 4, 0, 0);
+
 #if CONFIG_LOG
 static void status_thread(void)
 {
 	for (;;) {
 		k_sleep(K_SECONDS(5));
-		LOG_INF("SPI=%ld err=%ld rearm_err=%ld duplicates=%ld queue_full=%ld ESB_ok=%ld fail=%ld timeout=%ld",
+		LOG_INF("SPI=%ld err=%ld duplicates=%ld queue_full=%ld ESB_ok=%ld fail=%ld timeout=%ld",
 			(long)atomic_get(&spi_frames),
 			(long)atomic_get(&spi_errors),
-			(long)atomic_get(&spi_rearm_errors),
 			(long)atomic_get(&spi_duplicates),
 			(long)atomic_get(&report_queue_overruns),
 			(long)atomic_get(&esb_tx_successes),
@@ -336,8 +313,11 @@ int main(void)
 {
 	int err = esb_initialize();
 	if (err != 0) return err;
-	err = spis_initialize();
-	if (err != 0) return err;
+
+	if (!device_is_ready(spi_device)) {
+		LOG_ERR("SPI slave device is not ready");
+		return -ENODEV;
+	}
 	k_sem_give(&esb_started);
 
 	for (;;) {
@@ -355,8 +335,7 @@ int main(void)
 		}
 
 		esb_disable();
-		nrfx_spis_uninit(&spis_instance);
-		nrf_gpio_cfg_sense_input(SPIS_CSN_PIN,
+		nrf_gpio_cfg_sense_input(NRF_GPIO_PIN_MAP(0, 22),
 					 NRF_GPIO_PIN_PULLUP,
 					 NRF_GPIO_PIN_SENSE_LOW);
 		sys_poweroff();
