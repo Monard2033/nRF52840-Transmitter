@@ -35,7 +35,7 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_CONTROL_POLL_ACK   0x02U
 #define LINK_ACK_MAGIC       0x5AU
-#define LINK_RF_CHANNEL      80U
+#define LINK_RF_CHANNEL      90U
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 2000U
 #define RETRY_BACKOFF_US     100U
@@ -148,7 +148,7 @@ static int esb_initialize(void)
 	esb_config.bitrate = ESB_BITRATE_2MBPS;
 	esb_config.tx_output_power = ESB_TX_POWER_8DBM;
 	esb_config.retransmit_delay = 450;
-	esb_config.retransmit_count = 1;
+	esb_config.retransmit_count = 4;
 	esb_config.payload_length = sizeof(struct link_frame);
 	esb_config.selective_auto_ack = true;
 	esb_config.use_fast_ramp_up = true;
