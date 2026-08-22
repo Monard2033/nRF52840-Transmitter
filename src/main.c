@@ -37,7 +37,7 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_ACK_MAGIC       0x5AU
 #define LINK_RF_CHANNEL      90U
 #define REPORT_QUEUE_DEPTH   256U
-#define ESB_EVENT_TIMEOUT_US 2000U
+#define ESB_EVENT_TIMEOUT_US 15000U
 #define RETRY_BACKOFF_US     100U
 
 struct link_frame {
@@ -197,9 +197,13 @@ static void radio_thread(void)
 		k_msgq_get(&report_queue, &frame, K_FOREVER);
 		atomic_set(&radio_frame_in_flight, 1);
 
-		/* Do not dequeue the next SPI report until this exact frame received
-		 * a hardware ESB ACK. This preserves order including key releases. */
-		while (esb_send_once(&frame) != 0) {
+		/* Up to 3 attempts with 4 hardware retransmits each. If the receiver
+		 * is temporarily absent, do not stall forever so subsequent key
+		 * releases are processed cleanly. */
+		for (int retry = 0; retry < 3; ++retry) {
+			if (esb_send_once(&frame) == 0) {
+				break;
+			}
 			k_busy_wait(RETRY_BACKOFF_US);
 		}
 		atomic_set(&radio_frame_in_flight, 0);
