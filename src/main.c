@@ -35,7 +35,10 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_CONTROL_POLL_ACK   0x02U
 #define LINK_ACK_MAGIC       0x5AU
-#define LINK_RF_CHANNEL      90U
+static const uint8_t channel_table[] = { 90U, 95U, 85U };
+#define CHANNEL_COUNT        ARRAY_SIZE(channel_table)
+static uint8_t current_channel_idx = 0U;
+static uint8_t consecutive_tx_failures = 0U;
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 15000U
 #define RETRY_BACKOFF_US     100U
@@ -147,8 +150,8 @@ static int esb_initialize(void)
 	esb_config.mode = ESB_MODE_PTX;
 	esb_config.bitrate = ESB_BITRATE_2MBPS;
 	esb_config.tx_output_power = ESB_TX_POWER_8DBM;
-	esb_config.retransmit_delay = 450;
-	esb_config.retransmit_count = 4;
+	esb_config.retransmit_delay = 400;
+	esb_config.retransmit_count = 1;
 	esb_config.payload_length = sizeof(struct link_frame);
 	esb_config.selective_auto_ack = true;
 	esb_config.use_fast_ramp_up = true;
@@ -162,7 +165,7 @@ static int esb_initialize(void)
 	if (err != 0) return err;
 	err = esb_set_prefixes(address_prefixes, ARRAY_SIZE(address_prefixes));
 	if (err != 0) return err;
-	return esb_set_rf_channel(LINK_RF_CHANNEL);
+	return esb_set_rf_channel(channel_table[current_channel_idx]);
 }
 
 static int esb_send_once(const struct link_frame *frame)
@@ -197,14 +200,19 @@ static void radio_thread(void)
 		k_msgq_get(&report_queue, &frame, K_FOREVER);
 		atomic_set(&radio_frame_in_flight, 1);
 
-		/* Up to 3 attempts with 4 hardware retransmits each. If the receiver
-		 * is temporarily absent, do not stall forever so subsequent key
-		 * releases are processed cleanly. */
-		for (int retry = 0; retry < 3; ++retry) {
-			if (esb_send_once(&frame) == 0) {
-				break;
+		int send_err = esb_send_once(&frame);
+		if (send_err == 0) {
+			consecutive_tx_failures = 0U;
+		} else {
+			consecutive_tx_failures++;
+			if (consecutive_tx_failures >= 3U) {
+				/* 3 consecutive missed ACKs: channel degraded, hop 1 step to next channel */
+				current_channel_idx = (current_channel_idx + 1U) % (uint8_t)CHANNEL_COUNT;
+				(void)esb_set_rf_channel(channel_table[current_channel_idx]);
+				consecutive_tx_failures = 0U;
+				/* Retry immediately on the fresh clean channel */
+				(void)esb_send_once(&frame);
 			}
-			k_busy_wait(RETRY_BACKOFF_US);
 		}
 		atomic_set(&radio_frame_in_flight, 0);
 	}
