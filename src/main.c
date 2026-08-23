@@ -34,15 +34,8 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_TYPE_CONTROL    0x03U
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_CONTROL_POLL_ACK   0x02U
-#define LINK_CONTROL_SWITCH_CHANNEL 0x05U
 #define LINK_ACK_MAGIC       0x5AU
-#define LINK_ACK_TYPE_CHANNEL_CONFIRM 0x05U
-static const uint8_t channel_table[] = { 90U, 95U, 85U };
-#define CHANNEL_COUNT        ARRAY_SIZE(channel_table)
-static uint8_t current_channel_idx = 0U;
-static uint8_t consecutive_tx_failures = 0U;
-static uint32_t last_tx_success_uptime_ms = 0U;
-#define FALLBACK_TIMEOUT_MS  1000U
+#define LINK_RF_CHANNEL      90U
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 15000U
 #define RETRY_BACKOFF_US     100U
@@ -154,8 +147,8 @@ static int esb_initialize(void)
 	esb_config.mode = ESB_MODE_PTX;
 	esb_config.bitrate = ESB_BITRATE_2MBPS;
 	esb_config.tx_output_power = ESB_TX_POWER_8DBM;
-	esb_config.retransmit_delay = 400;
-	esb_config.retransmit_count = 1;
+	esb_config.retransmit_delay = 450;
+	esb_config.retransmit_count = 4;
 	esb_config.payload_length = sizeof(struct link_frame);
 	esb_config.selective_auto_ack = true;
 	esb_config.use_fast_ramp_up = true;
@@ -169,7 +162,7 @@ static int esb_initialize(void)
 	if (err != 0) return err;
 	err = esb_set_prefixes(address_prefixes, ARRAY_SIZE(address_prefixes));
 	if (err != 0) return err;
-	return esb_set_rf_channel(channel_table[current_channel_idx]);
+	return esb_set_rf_channel(LINK_RF_CHANNEL);
 }
 
 static int esb_send_once(const struct link_frame *frame)
@@ -204,43 +197,11 @@ static void radio_thread(void)
 		k_msgq_get(&report_queue, &frame, K_FOREVER);
 		atomic_set(&radio_frame_in_flight, 1);
 
-		/* Automatic fallback to Home Channel 0 (Canal 90) after 1s silence */
-		uint32_t const now_ms = k_uptime_get_32();
-		if (current_channel_idx != 0U && (now_ms - last_tx_success_uptime_ms) > FALLBACK_TIMEOUT_MS) {
-			current_channel_idx = 0U;
-			(void)esb_set_rf_channel(channel_table[0]);
-			last_tx_success_uptime_ms = now_ms;
-		}
-
-		int send_err = esb_send_once(&frame);
-		if (send_err == 0) {
-			consecutive_tx_failures = 0U;
-			last_tx_success_uptime_ms = k_uptime_get_32();
-		} else {
-			consecutive_tx_failures++;
-			if (consecutive_tx_failures >= 3U) {
-				/* Handshake channel switch to next channel in table */
-				uint8_t const target_idx = (current_channel_idx + 1U) % (uint8_t)CHANNEL_COUNT;
-				struct link_frame switch_cmd = {
-					.magic = LINK_MAGIC,
-					.version = LINK_VERSION,
-					.type = LINK_TYPE_CONTROL,
-					.sequence = 0,
-					.data = { LINK_CONTROL_SWITCH_CHANNEL, target_idx, 0, 0, 0, 0, 0, 0 },
-				};
-				/* Send switch handshake command on current channel */
-				(void)esb_send_once(&switch_cmd);
-
-				/* Switch both to the agreed target channel */
-				current_channel_idx = target_idx;
-				(void)esb_set_rf_channel(channel_table[current_channel_idx]);
-				consecutive_tx_failures = 0U;
-
-				/* Retransmit the user's keystroke immediately on the fresh channel */
-				if (esb_send_once(&frame) == 0) {
-					last_tx_success_uptime_ms = k_uptime_get_32();
-				}
+		for (int retry = 0; retry < 3; ++retry) {
+			if (esb_send_once(&frame) == 0) {
+				break;
 			}
+			k_busy_wait(RETRY_BACKOFF_US);
 		}
 		atomic_set(&radio_frame_in_flight, 0);
 	}
