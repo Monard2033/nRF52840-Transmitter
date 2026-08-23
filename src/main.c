@@ -200,19 +200,11 @@ static void radio_thread(void)
 		k_msgq_get(&report_queue, &frame, K_FOREVER);
 		atomic_set(&radio_frame_in_flight, 1);
 
-		int send_err = esb_send_once(&frame);
-		if (send_err == 0) {
-			consecutive_tx_failures = 0U;
-		} else {
-			consecutive_tx_failures++;
-			if (consecutive_tx_failures >= 3U) {
-				/* 3 consecutive missed ACKs: channel degraded, hop 1 step to next channel */
-				current_channel_idx = (current_channel_idx + 1U) % (uint8_t)CHANNEL_COUNT;
-				(void)esb_set_rf_channel(channel_table[current_channel_idx]);
-				consecutive_tx_failures = 0U;
-				/* Retry immediately on the fresh clean channel */
-				(void)esb_send_once(&frame);
+		for (int retry = 0; retry < 3; ++retry) {
+			if (esb_send_once(&frame) == 0) {
+				break;
 			}
+			k_busy_wait(RETRY_BACKOFF_US);
 		}
 		atomic_set(&radio_frame_in_flight, 0);
 	}
