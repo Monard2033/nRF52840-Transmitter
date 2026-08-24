@@ -38,7 +38,7 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_RF_CHANNEL      90U
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 15000U
-#define RETRY_BACKOFF_US     100U
+#define RETRY_BACKOFF_US     50U
 
 struct link_frame {
 	uint8_t magic;
@@ -148,7 +148,7 @@ static int esb_initialize(void)
 	esb_config.bitrate = ESB_BITRATE_2MBPS;
 	esb_config.tx_output_power = ESB_TX_POWER_8DBM;
 	esb_config.retransmit_delay = 450;
-	esb_config.retransmit_count = 4;
+	esb_config.retransmit_count = 6;
 	esb_config.payload_length = sizeof(struct link_frame);
 	esb_config.selective_auto_ack = true;
 	esb_config.use_fast_ramp_up = true;
@@ -197,10 +197,9 @@ static void radio_thread(void)
 		k_msgq_get(&report_queue, &frame, K_FOREVER);
 		atomic_set(&radio_frame_in_flight, 1);
 
-		for (int retry = 0; retry < 3; ++retry) {
-			if (esb_send_once(&frame) == 0) {
-				break;
-			}
+		/* Do not dequeue the next SPI report until this exact frame received
+		 * a hardware ESB ACK. This guarantees zero lost keys and zero stuck keys. */
+		while (esb_send_once(&frame) != 0) {
 			k_busy_wait(RETRY_BACKOFF_US);
 		}
 		atomic_set(&radio_frame_in_flight, 0);
