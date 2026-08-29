@@ -1,0 +1,91 @@
+/ {
+    gpio-leds {
+        compatible = "gpio-leds";
+        red_led: red {
+            gpios = <&gpio0 22 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+            label = "Red LED";
+        };
+        green_led: green {
+            gpios = <&gpio0 24 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+            label = "Green LED";
+        };
+        blue_led: blue {
+            gpios = <&gpio1 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+            label = "Blue LED";
+        };
+        data_plus_pin: datapluspin {
+            gpios = <&gpio0 20 (GPIO_ACTIVE_HIGH)>;
+            label = "Data Plus Pin";
+        };
+
+        data_minus_pin: dataminuspin {
+            gpios = <&gpio0 17 (GPIO_PULL_DOWN | GPIO_ACTIVE_LOW)>;
+            label = "Data Minus Pin";
+        };
+    };
+        adc_input: adc-input {
+            compatible = "voltage-divider";
+            io-channels = <&adc 2>;
+            output-ohms = <100000>;
+            full-ohms = <1100000>;
+        };
+ 
+     /* Define aliases to refer to the nodes above */
+    aliases {
+        //datapluspin = &data_plus_pin;
+        //dataminuspin = &data_minus_pin;
+        led-red = &red_led;
+        led-green = &green_led;
+        led-blue = &blue_led;
+        batteryadc = &adc_input;
+    };
+};
+&adc {
+    status = "okay";
+    #address-cells = <1>;
+    #size-cells = <0>;
+    
+    channel@2 {
+        reg = <2>;
+        zephyr,gain = "ADC_GAIN_1_6";
+        zephyr,reference = "ADC_REF_INTERNAL";
+        zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+        zephyr,vref-mv = <600>;
+        zephyr,input-positive = <2>;  // R1
+        zephyr,resolution = <12>; // 12-bit resolution
+    };
+};
+&gpio0 {
+    status = "okay";
+};
+&gpio1 {
+    status = "okay";
+};
+&cryptocell {
+    status = "disabled";
+};
+
+&acl {
+    zephyr,deferred-init;
+    status = "disabled";
+};
+
+
+&spi3 {
+    status = "disabled";
+    pinctrl-0 = <&spi3_default>;
+    pinctrl-names = "default";
+};
+
+&pinctrl {
+    spi3_default: spi3_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 31)>, <NRF_PSEL(SPIM_MOSI, 0, 17)>;
+        };
+
+        group2 {
+            psels = <NRF_PSEL(SPIM_MISO, 0, 20)>;
+            nordic,drive-mode = <NRF_DRIVE_H0S1>;
+        };
+    };
+};
