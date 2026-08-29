@@ -242,7 +242,7 @@ static void spi_slave_thread(void)
 		int err = spi_transceive(spi_device, &spi_slave_config, &tx, &rx);
 		if (err < 0) {
 			atomic_inc(&spi_errors);
-			k_msleep(1);
+			k_yield();
 			continue;
 		}
 
