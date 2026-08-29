@@ -1,16 +1,18 @@
-﻿# nRF52840 Pro Micro Wireless Transmitter
+# nRF52840 Pro Micro Wireless Transmitter
 
 This firmware runs on the **SuperMini / Pro Micro nRF52840** module located inside the custom wireless keyboard housing. It acts as the ultra-fast SPI Slave bridge connected to the RP2040 Host Controller, forwarding keyboard inputs, multimedia keys, and battery telemetry over a dedicated 2.4 GHz Enhanced ShockBurst (ESB) wireless link to the USB Receiver Dongle.
 
 ---
 
-## Current Release Baseline (v1.0-stable)
+## Ecosystem & Repositories (v1.0 Stable)
 
-- **Branch**: `release/v1.0-stable` across all three project repositories:
-  - [RP2040 Keyboard Controller](https://github.com/Monard2033/RaspberryPicoUSBHost)
-  - [nRF52840 Transmitter](https://github.com/Monard2033/nRF52840-Transmitter)
-  - [nRF52840 Receiver](https://github.com/Monard2033/nRF52840-Receiver)
-- **Primary Binary Artifact**: [`firmware/transmitter.uf2`](firmware/transmitter.uf2)
+This firmware is part of the 3-tier custom wireless keyboard project:
+- 🧠 **[RP2040 Keyboard Controller](https://github.com/Monard2033/RaspberryPicoUSBHost)**: USB Host, Battery ADC & 8 MHz SPI Master.
+- 📻 **[nRF52840 Transmitter](https://github.com/Monard2033/nRF52840-Transmitter)** (this repository): Pro Micro SPI Slave & 2.4 GHz ESB PTX (+8 dBm).
+- 📡 **[nRF52840 Receiver](https://github.com/Monard2033/nRF52840-Receiver)**: USB Dongle 2.4 GHz ESB PRX & 1000 Hz USB HID Bridge.
+
+### Primary Release Artifacts
+- **Firmware Binary**: [`firmware/transmitter.uf2`](firmware/transmitter.uf2)
 - **SHA-256 Checksum**: `52996D63E5B6F7BC4225576D4B5427EA804444F583E5B19AC592C0DDAD9C7295`
 
 ---
