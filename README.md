@@ -37,6 +37,10 @@ This firmware is part of the 3-tier custom wireless keyboard project:
 
 ## Hardware Pinout & Wiring (RP2040 $\leftrightarrow$ nRF52840 Transmitter)
 
+<p align="center">
+  <img src="Wiring_Schematic_Keyboard_V5.svg" alt="Wireless Keyboard Hardware Wiring Schematic V5" width="100%">
+</p>
+
 | RP2040 Pin | nRF52840 ProMicro Pin | Signal Name | Description |
 | :---: | :---: | :---: | :--- |
 | **`GP6`** | **`P0.17`** | **`SPI SCK`** | 8 MHz SPI Serial Clock from RP2040 Master |
