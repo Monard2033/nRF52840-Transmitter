@@ -1,0 +1,241 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1500" viewBox="0 0 2200 1500" style="background-color: #ffffff;">
+  <defs>
+    <style>
+      .title { font: 700 42px "Segoe UI", Arial, sans-serif; fill: #0f172a; letter-spacing: 1px; }
+      .h { font: 700 24px "Segoe UI", Arial, sans-serif; fill: #1e293b; }
+      .t { font: 18px "Segoe UI", Arial, sans-serif; fill: #334155; }
+      .pin-dark { font: 700 16px Consolas, monospace; fill: #f8fafc; }
+      .pin-light { font: 700 16px Consolas, monospace; fill: #0f172a; }
+      
+      .box { fill: #f8fafc; stroke: #475569; stroke-width: 4; rx: 12px; }
+      .mcu { fill: #1e293b; stroke: #0f172a; stroke-width: 5; rx: 16px; }
+      .power { fill: #ecfdf5; stroke: #059669; stroke-width: 4; rx: 12px; }
+      .dongle { fill: #f1f5f9; stroke: #64748b; stroke-width: 4; stroke-dasharray: 12 8; rx: 12px; }
+      
+      .wire { fill: none; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
+      .wire-thin { fill: none; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+      
+      .pad-dark { fill: #334155; stroke: #94a3b8; stroke-width: 3; }
+      .pad-light { fill: #ffffff; stroke: #475569; stroke-width: 3; }
+      .junction { fill: #0f172a; }
+      
+      .nc { stroke: #ef4444; stroke-width: 6; stroke-linecap: round; }
+      .tag { font: 700 16px "Segoe UI", Arial, sans-serif; }
+      .legend-title { font: 700 28px "Segoe UI", Arial, sans-serif; fill: #0f172a; }
+      .legend-text { font: 18px "Segoe UI", Arial, sans-serif; fill: #1e293b; }
+    </style>
+  </defs>
+
+  <text x="1100" y="70" text-anchor="middle" class="title">WIRELESS KEYBOARD WIRING SCHEMATIC — RP2040 + nRF52840</text>
+  <text x="1100" y="110" text-anchor="middle" class="t">Revised Architecture - No overlaps (USB traces routed over nRF module)</text>
+
+  <!-- BATTERY -->
+  <rect x="50" y="250" width="160" height="280" class="box"/>
+  <text x="130" y="300" text-anchor="middle" class="h">BATTERY</text>
+  <text x="130" y="330" text-anchor="middle" class="t">Li-ion / LiPo 1S</text>
+  <text x="130" y="355" text-anchor="middle" class="t">3.0–4.2 V</text>
+  <circle cx="210" cy="400" r="8" class="pad-light"/><text x="155" y="405" class="pin-light">BAT+</text>
+  <circle cx="210" cy="480" r="8" class="pad-light"/><text x="155" y="485" class="pin-light">BAT−</text>
+  
+  <!-- J5019 -->
+  <rect x="350" y="250" width="220" height="280" class="power"/>
+  <text x="460" y="295" text-anchor="middle" class="h">J5019</text>
+  <text x="460" y="325" text-anchor="middle" class="t">Boost Regulator</text>
+  <rect x="415" y="470" width="90" height="40" rx="6" fill="#059669"/><text x="460" y="497" text-anchor="middle" font-family="Arial" font-size="17" fill="white" font-weight="bold">USB-C</text>
+  
+  <circle cx="350" cy="400" r="8" class="pad-light"/><text x="365" y="405" class="pin-light">BAT+</text>
+  <circle cx="350" cy="480" r="8" class="pad-light"/><text x="365" y="485" class="pin-light">BAT−</text>
+  <circle cx="570" cy="400" r="8" class="pad-light"/><text x="505" y="405" class="pin-light">VOUT+</text>
+  <circle cx="570" cy="480" r="8" class="pad-light"/><text x="505" y="485" class="pin-light">VOUT−</text>
+
+  <!-- SPST SWITCH -->
+  <rect x="660" y="200" width="140" height="70" class="box"/>
+  <text x="730" y="225" text-anchor="middle" class="h">SPST</text>
+  <line x1="680" y1="250" x2="710" y2="250" stroke="#111" stroke-width="5" stroke-linecap="round"/>
+  <line x1="750" y1="250" x2="780" y2="250" stroke="#111" stroke-width="5" stroke-linecap="round"/>
+  <line x1="710" y1="250" x2="750" y2="230" stroke="#111" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- WeAct Studio RP2040 -->
+  <rect x="850" y="320" width="240" height="660" class="mcu"/>
+  <text x="970" y="360" text-anchor="middle" class="h" fill="#fbbf24">WeAct Studio RP2040</text>
+  
+  <circle cx="850" cy="410" r="8" class="pad-dark"/><text x="870" y="415" class="pin-dark">VSYS</text>
+  <circle cx="850" cy="455" r="8" class="pad-dark"/><text x="870" y="460" class="pin-dark">GND</text>
+  <circle cx="850" cy="545" r="8" class="pad-dark"/><text x="870" y="550" class="pin-dark">3V3(OUT)</text>
+  <circle cx="850" cy="590" r="8" class="pad-dark"/><text x="870" y="595" class="pin-dark">ADC_VREF</text>
+  <line x1="825" y1="575" x2="845" y2="605" class="nc"/><line x1="845" y1="575" x2="825" y2="605" class="nc"/> 
+  <circle cx="850" cy="635" r="8" class="pad-dark"/><text x="870" y="640" class="pin-dark">GP28 / ADC2</text>
+
+  <circle cx="1090" cy="545" r="8" class="pad-dark"/><text x="1045" y="550" class="pin-dark">GP4</text>
+  <circle cx="1090" cy="590" r="8" class="pad-dark"/><text x="1045" y="595" class="pin-dark">GP5</text>
+  <circle cx="1090" cy="635" r="8" class="pad-dark"/><text x="1045" y="640" class="pin-dark">GP6</text>
+  <circle cx="1090" cy="680" r="8" class="pad-dark"/><text x="1045" y="685" class="pin-dark">GP7</text>
+  <circle cx="1090" cy="725" r="8" class="pad-dark"/><text x="1045" y="730" class="pin-dark">GP8</text>
+  <circle cx="1090" cy="770" r="8" class="pad-dark"/><text x="1045" y="775" class="pin-dark">GP9</text>
+  <circle cx="1090" cy="815" r="8" class="pad-dark"/><text x="1035" y="820" class="pin-dark">GP10</text>
+  <circle cx="1090" cy="860" r="8" class="pad-dark"/><text x="1035" y="865" class="pin-dark">GP11</text>
+  <circle cx="1090" cy="905" r="8" class="pad-dark"/><text x="1035" y="910" class="pin-dark">GP12</text>
+
+  <!-- ProMicro nRF52840 -->
+  <rect x="1450" y="470" width="220" height="340" class="mcu"/>
+  <text x="1560" y="515" text-anchor="middle" class="h" fill="#fbbf24">ProMicro nRF52840</text>
+  
+  <circle cx="1450" cy="545" r="8" class="pad-dark"/><text x="1470" y="550" class="pin-dark">VCC / 3V3</text>
+  <circle cx="1450" cy="635" r="8" class="pad-dark"/><text x="1470" y="640" class="pin-dark">P0.17 - SCK</text>
+  <circle cx="1450" cy="680" r="8" class="pad-dark"/><text x="1470" y="685" class="pin-dark">P0.20 - MOSI</text>
+  <circle cx="1450" cy="725" r="8" class="pad-dark"/><text x="1470" y="730" class="pin-dark">P0.08 - MISO</text>
+  <circle cx="1450" cy="770" r="8" class="pad-dark"/><text x="1470" y="775" class="pin-dark">P0.22 - CSN</text>
+  <circle cx="1450" cy="860" r="8" class="pad-dark"/><text x="1470" y="865" class="pin-dark">GND</text>
+
+  <!-- USB Keyboard -->
+  <rect x="1800" y="460" width="180" height="230" class="box"/>
+  <text x="1890" y="500" text-anchor="middle" class="h">USB KEYBOARD</text>
+  <text x="1890" y="525" text-anchor="middle" class="t">Physical port</text>
+  
+  <circle cx="1800" cy="545" r="8" class="pad-light"/><text x="1820" y="550" class="pin-light">D+</text>
+  <circle cx="1800" cy="590" r="8" class="pad-light"/><text x="1820" y="595" class="pin-light">D−</text>
+  <circle cx="1800" cy="460" r="8" class="pad-light"/><text x="1820" y="480" class="pin-light">VBUS 5V</text>
+  <circle cx="1800" cy="650" r="8" class="pad-light"/><text x="1820" y="655" class="pin-light">GND</text>
+
+  <!-- RGB LED -->
+  <rect x="1450" y="850" width="220" height="220" class="box"/>
+  <text x="1560" y="890" text-anchor="middle" class="h">RGB LED</text>
+  <text x="1560" y="915" text-anchor="middle" class="t">(Common Cathode)</text>
+  
+  <circle cx="1450" cy="940" r="8" class="pad-light"/><text x="1470" y="945" class="pin-light">R</text>
+  <circle cx="1450" cy="980" r="8" class="pad-light"/><text x="1470" y="985" class="pin-light">G</text>
+  <circle cx="1450" cy="1020" r="8" class="pad-light"/><text x="1470" y="1025" class="pin-light">B</text>
+  <circle cx="1450" cy="1060" r="8" class="pad-light"/><text x="1470" y="1065" class="pin-light">C (GND)</text>
+
+  <!-- Dongle -->
+  <rect x="2020" y="460" width="150" height="150" class="dongle"/>
+  <text x="2095" y="500" text-anchor="middle" class="h">DONGLE</text>
+  <text x="2095" y="530" text-anchor="middle" class="t">nRF52840</text>
+  <rect x="2060" y="550" width="70" height="40" rx="4" fill="#334155"/>
+
+  <!-- ==================== WIRING ==================== -->
+  
+  <line x1="100" y1="1130" x2="2100" y2="1130" stroke="#0f172a" stroke-width="14" stroke-linecap="round"/>
+  <text x="1100" y="1165" text-anchor="middle" class="tag" fill="#0f172a">BLACK — COMMON GROUND (GND) — 0V</text>
+
+  <path d="M210 480 V1130" class="wire" stroke="#0f172a"/> <circle cx="210" cy="1130" r="10" class="junction"/>
+  <path d="M350 480 V1130" class="wire" stroke="#0f172a"/> <circle cx="350" cy="1130" r="10" class="junction"/>
+  <path d="M570 480 V1130" class="wire" stroke="#0f172a"/> <circle cx="570" cy="1130" r="10" class="junction"/>
+  <path d="M850 455 H800 V1130" class="wire" stroke="#0f172a"/> <circle cx="800" cy="1130" r="10" class="junction"/>
+  <path d="M1450 860 H1400 V1130" class="wire" stroke="#0f172a"/> <circle cx="1400" cy="1130" r="10" class="junction"/>
+  <path d="M1800 650 H1750 V1130" class="wire" stroke="#0f172a"/> <circle cx="1750" cy="1130" r="10" class="junction"/>
+  <path d="M1450 1060 H1400" class="wire" stroke="#0f172a"/> 
+
+  <path d="M210 400 H350" class="wire" stroke="#ef4444"/>
+  <text x="245" y="385" class="tag" fill="#ef4444">BAT+</text>
+
+  <path d="M570 400 V235 H660" class="wire" stroke="#ef4444"/>
+  <text x="585" y="380" class="tag" fill="#ef4444">VOUT+ (5.0V)</text>
+
+  <!-- VBUS connection -->
+  <path d="M800 235 H1790 V460 H1800" class="wire" stroke="#ef4444"/>
+  <path d="M800 235 V410 H850" class="wire" stroke="#ef4444"/>
+  <circle cx="800" cy="235" r="8" fill="#ef4444"/>
+  <text x="1250" y="220" class="tag" fill="#ef4444">SWITCHED +5 V (System Power)</text>
+
+  <!-- 3V3 White Wire (Outline + Core) -->
+  <path d="M850 545 H750 V280 H1350 V545 H1450" class="wire" stroke="#000000" stroke-width="12"/>
+  <path d="M850 545 H750 V280 H1350 V545 H1450" class="wire" stroke="#ffffff" stroke-width="6"/>
+  <text x="1050" y="270" class="tag" fill="#000000">WHITE — 3V3(OUT) to nRF52840 VCC</text>
+
+  <!-- Bypassed USB Data Lines (OVER nRF52840) -->
+  <path d="M1090 545 H1150 V410 H1770 V545 H1800" class="wire" stroke="#8b5a2b"/> 
+  <text x="1400" y="400" class="tag" fill="#8b5a2b">BROWN: GP4 → D+</text>
+  
+  <path d="M1090 590 H1130 V430 H1750 V590 H1800" class="wire" stroke="#64748b"/> 
+  <text x="1400" y="445" class="tag" fill="#64748b">GRAY: GP5 → D−</text>
+  
+  <!-- SPI Lines -->
+  <path d="M1090 635 H1450" class="wire" stroke="#eab308"/> <text x="1220" y="625" class="tag" fill="#eab308">YELLOW: GP6 → SCK</text>
+  <path d="M1090 680 H1450" class="wire" stroke="#3b82f6"/> <text x="1220" y="670" class="tag" fill="#3b82f6">BLUE: GP7 → MOSI</text>
+  <path d="M1090 725 H1450" class="wire" stroke="#a855f7"/> <text x="1220" y="715" class="tag" fill="#a855f7">PURPLE: GP8 → MISO</text>
+  <path d="M1090 770 H1450" class="wire" stroke="#22c55e"/> <text x="1220" y="760" class="tag" fill="#22c55e">GREEN: GP9 → CSN</text>
+
+  <!-- Clean LED Lines with staggered vertical drops -->
+  <path d="M1090 815 H1210" class="wire" stroke="#ef4444"/>
+  <polyline points="1210,815 1220,800 1240,830 1260,800 1280,830 1290,815 1430,815" class="wire-thin" stroke="#ef4444"/>
+  <path d="M1430 815 V940 H1450" class="wire" stroke="#ef4444"/>
+  
+  <path d="M1090 860 H1210" class="wire" stroke="#22c55e"/>
+  <polyline points="1210,860 1220,845 1240,875 1260,845 1280,875 1290,860 1410,860" class="wire-thin" stroke="#22c55e"/>
+  <path d="M1410 860 V980 H1450" class="wire" stroke="#22c55e"/>
+  
+  <path d="M1090 905 H1210" class="wire" stroke="#3b82f6"/>
+  <polyline points="1210,905 1220,890 1240,920 1260,890 1280,920 1290,905 1390,905" class="wire-thin" stroke="#3b82f6"/>
+  <path d="M1390 905 V1020 H1450" class="wire" stroke="#3b82f6"/>
+  
+  <text x="1285" y="790" class="tag" fill="#ef4444">220Ω - 330Ω per channel</text>
+
+  <!-- ADC DIVIDER NETWORK -->
+  <path d="M280 400 V635 H350" class="wire-thin" stroke="#f97316"/>
+  <circle cx="280" cy="400" r="6" fill="#f97316"/>
+  
+  <polyline points="350,635 365,620 385,650 405,620 425,650 440,635 480,635" class="wire-thin" stroke="#f97316"/>
+  <text x="395" y="610" class="tag" fill="#f97316">200 kΩ</text>
+  
+  <circle cx="480" cy="635" r="8" fill="#f97316"/>
+  <path d="M480 635 H850" class="wire-thin" stroke="#f97316"/>
+  <text x="630" y="625" class="tag" fill="#f97316">ORANGE: ADC_NODE → GP28</text>
+
+  <polyline points="480,635 480,680 465,695 495,715 465,735 495,755 480,770 480,1130" class="wire-thin" stroke="#111"/>
+  <text x="415" y="735" class="tag" fill="#111">100 kΩ</text>
+  <circle cx="480" cy="1130" r="10" class="junction"/>
+
+  <circle cx="550" cy="635" r="6" fill="#f97316"/>
+  <path d="M550 635 V720" class="wire-thin" stroke="#111"/>
+  <line x1="520" y1="720" x2="580" y2="720" stroke="#111" stroke-width="5"/>
+  <line x1="520" y1="740" x2="580" y2="740" stroke="#111" stroke-width="5"/>
+  <path d="M550 740 V1130" class="wire-thin" stroke="#111"/>
+  <text x="595" y="725" class="tag" fill="#111">
+    <tspan>100 nF (Optional)</tspan>
+    <tspan x="595" dy="20">But very effective</tspan>
+    <tspan x="595" dy="20">for filtering</tspan>
+  </text>
+  <circle cx="550" cy="1130" r="10" class="junction"/>
+
+  <!-- ==================== LEGEND & NOTES ==================== -->
+  <rect x="50" y="1220" width="2100" height="270" class="box" fill="#f8fafc" stroke="#334155"/>
+  <text x="80" y="1265" class="legend-title">LEGEND &amp; ASSEMBLY NOTES</text>
+  
+  <!-- Separator Line -->
+  <line x1="80" y1="1285" x2="2110" y2="1285" stroke="#cbd5e1" stroke-width="3"/>
+
+  <!-- Left Column: Annotations (Multiline handled manually via tspan for SVG native support) -->
+  <g class="legend-text">
+    <text x="80" y="1315">
+      <tspan font-weight="bold" fill="#c2410c">1. J5019 CALIBRATION:</tspan> Before connecting the boards, adjust the VOUT output
+      <tspan x="80" dy="22">to exactly 5.00V (measured with a multimeter).</tspan>
+    </text>
+    <text x="80" y="1355">
+      <tspan font-weight="bold">2. SPST LOGIC:</tspan> The switch completely cuts power (5V) to the RP2040, nRF, and
+      <tspan x="80" dy="22">Keyboard. The J5019 module remains connected to the battery.</tspan>
+    </text>
+    <text x="80" y="1395">
+      <tspan font-weight="bold" fill="#dc2626">3. ADC PROTECTION:</tspan> The battery MUST NOT be connected directly to GP28 (max 3.3V
+      <tspan x="80" dy="22">supported). The signal must pass through the 200k/100k divider.</tspan>
+    </text>
+    <text x="80" y="1435">
+      <tspan font-weight="bold">4. DONGLE:</tspan> The nRF52840 receiver plugs directly into the PC's USB port and
+      <tspan x="80" dy="22">communicates exclusively wirelessly. It has no physical connections to the board.</tspan>
+    </text>
+  </g>
+
+  <!-- Right Column: Wire Guide -->
+  <line x1="1200" y1="1285" x2="1200" y2="1470" stroke="#cbd5e1" stroke-width="3"/>
+  <g class="legend-text">
+    <text x="1230" y="1315" font-weight="bold">RECOMMENDED COLOR CODE:</text>
+    <text x="1230" y="1355"><tspan fill="#ef4444" font-weight="bold">RED:</tspan> Power (+BAT, +5V)</text>
+    <text x="1560" y="1355"><tspan fill="#0f172a" font-weight="bold">BLACK:</tspan> Ground (GND, 0V)</text>
+    <text x="1850" y="1355"><tspan fill="#475569" font-weight="bold">WHITE:</tspan> 3V3 Logic</text>
+
+    <text x="1230" y="1395"><tspan fill="#f97316" font-weight="bold">ORANGE:</tspan> ADC Trace</text>
+    <text x="1560" y="1395"><tspan fill="#8b5a2b" font-weight="bold">BROWN / GRAY:</tspan> USB Data D+ / D-</text>
+
+    <text x="1230" y="1435"><tspan font-weight="bold">YELLOW, BLUE, PURPLE, GREEN:</tspan> Reserved SPI communication traces.</text>
+  </g>
+</svg>
