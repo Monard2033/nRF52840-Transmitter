@@ -32,9 +32,11 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_VERSION         0x03U
 #define LINK_FRAME_SIZE      12U
 #define LINK_TYPE_CONTROL    0x03U
+#define LINK_TYPE_DFU_STATUS 0x13U
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
 #define LINK_CONTROL_POLL_ACK   0x02U
 #define LINK_ACK_MAGIC       0x5AU
+#define LINK_ACK_TYPE_DFU    0x02U
 #define LINK_RF_CHANNEL      90U
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 15000U
@@ -52,6 +54,7 @@ BUILD_ASSERT(sizeof(struct link_frame) == LINK_FRAME_SIZE);
 
 K_MSGQ_DEFINE(report_queue, sizeof(struct link_frame), REPORT_QUEUE_DEPTH,
 	      sizeof(uint32_t));
+K_MSGQ_DEFINE(dfu_miso_queue, sizeof(struct link_frame), 64, 4);
 static K_SEM_DEFINE(esb_tx_done, 0, 1);
 static K_SEM_DEFINE(esb_started, 0, 1);
 static K_SEM_DEFINE(poweroff_requested, 0, 1);
@@ -62,7 +65,7 @@ static struct esb_payload esb_rx_payload;
 static atomic_t esb_last_tx_succeeded;
 
 static struct k_spinlock spi_ack_lock;
-static struct link_frame spi_ack_response = {
+static struct link_frame spi_ack_response __aligned(4) = {
 	.magic = LINK_ACK_MAGIC,
 	.version = LINK_VERSION,
 };
@@ -113,9 +116,13 @@ static void transmitter_esb_event_handler(const struct esb_evt *event)
 				continue;
 			}
 
-			k_spinlock_key_t key = k_spin_lock(&spi_ack_lock);
-			memcpy(&spi_ack_response, &ack, sizeof(ack));
-			k_spin_unlock(&spi_ack_lock, key);
+			if (ack.type == LINK_ACK_TYPE_DFU) {
+				k_msgq_put(&dfu_miso_queue, &ack, K_NO_WAIT);
+			} else {
+				k_spinlock_key_t key = k_spin_lock(&spi_ack_lock);
+				memcpy(&spi_ack_response, &ack, sizeof(ack));
+				k_spin_unlock(&spi_ack_lock, key);
+			}
 		}
 		break;
 	default:
@@ -125,6 +132,10 @@ static void transmitter_esb_event_handler(const struct esb_evt *event)
 
 static void spi_ack_snapshot(struct link_frame *output)
 {
+	if (k_msgq_get(&dfu_miso_queue, output, K_NO_WAIT) == 0) {
+		return;
+	}
+
 	k_spinlock_key_t key = k_spin_lock(&spi_ack_lock);
 	memcpy(output, &spi_ack_response, sizeof(*output));
 	k_spin_unlock(&spi_ack_lock, key);
@@ -215,8 +226,8 @@ K_THREAD_DEFINE(radio_thread_id, 1536, radio_thread,
  * August 19 mechanism. */
 static void spi_slave_thread(void)
 {
-	struct link_frame spi_tx;
-	struct link_frame spi_rx;
+	static struct link_frame spi_tx __aligned(4);
+	static struct link_frame spi_rx __aligned(4);
 
 	for (;;) {
 		spi_ack_snapshot(&spi_tx);
@@ -258,7 +269,8 @@ static void spi_slave_thread(void)
 			continue;
 		}
 
-		if (last_spi_frame_valid &&
+		if (spi_rx.type != LINK_TYPE_DFU_STATUS &&
+		    last_spi_frame_valid &&
 		    memcmp(&spi_rx, &last_spi_frame, sizeof(spi_rx)) == 0) {
 			/* RP2040 safety copy with the same sequence: suppress
 			 * before ESB; HID semantics remain untouched. */
