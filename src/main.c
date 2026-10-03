@@ -47,6 +47,12 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 15000U
 #define RETRY_BACKOFF_US     50U
+#define ESB_MAX_TX_RETRIES   5U
+#define RETRY_BACKOFF_MS     1U
+#define POWEROFF_DRAIN_TIMEOUT_MS 50U
+#define FALLBACK_IDLE_TIMEOUT_MS (5U * 60U * 1000U)
+#define SPI_CSN_PIN          NRF_GPIO_PIN_MAP(0, 22)
+#define CSN_SETTLE_TIMEOUT_MS 50U
 
 struct link_frame {
 	uint8_t magic;
@@ -83,8 +89,10 @@ static atomic_t report_queue_overruns;
 static atomic_t esb_tx_successes;
 static atomic_t esb_tx_failures;
 static atomic_t esb_tx_timeouts;
+static atomic_t esb_tx_dropped;
 static atomic_t radio_frame_in_flight;
 static atomic_t poweroff_pending;
+static atomic_t last_spi_activity_uptime_ms;
 
 static struct link_frame last_spi_frame;
 static bool last_spi_frame_valid;
@@ -212,12 +220,25 @@ static void radio_thread(void)
 	k_sem_take(&esb_started, K_FOREVER);
 	for (;;) {
 		k_msgq_get(&report_queue, &frame, K_FOREVER);
+		if (atomic_get(&poweroff_pending) != 0) {
+			atomic_inc(&esb_tx_dropped);
+			continue;
+		}
+
 		atomic_set(&radio_frame_in_flight, 1);
 
-		/* Do not dequeue the next SPI report until this exact frame received
-		 * a hardware ESB ACK. This guarantees zero lost keys and zero stuck keys. */
+		/* Bounded retry loop: max ESB_MAX_TX_RETRIES attempts (each attempt includes
+		 * 6 ESB hardware retransmits). If Receiver is disconnected or unreachable,
+		 * drop frame after max attempts to prevent 100% CPU lock and battery drain. */
+		uint32_t retries = 0;
 		while (esb_send_once(&frame) != 0) {
-			k_busy_wait(RETRY_BACKOFF_US);
+			retries++;
+			if (retries >= ESB_MAX_TX_RETRIES ||
+			    atomic_get(&poweroff_pending) != 0) {
+				atomic_inc(&esb_tx_dropped);
+				break;
+			}
+			k_sleep(K_MSEC(RETRY_BACKOFF_MS));
 		}
 		atomic_set(&radio_frame_in_flight, 0);
 	}
@@ -275,6 +296,8 @@ static void spi_slave_thread(void)
 			continue;
 		}
 
+		atomic_set(&last_spi_activity_uptime_ms, (atomic_val_t)k_uptime_get_32());
+
 		/* DFU commands are never suppressed: the RP2040 DFU handler owns
 		 * all replay/duplicate policy for the OTA stream. */
 		if (spi_rx.type >= LINK_TYPE_DFU_FIRST &&
@@ -325,14 +348,15 @@ static void status_thread(void)
 {
 	for (;;) {
 		k_sleep(K_SECONDS(5));
-		LOG_INF("SPI=%ld err=%ld duplicates=%ld queue_full=%ld ESB_ok=%ld fail=%ld timeout=%ld",
+		LOG_INF("SPI=%ld err=%ld duplicates=%ld queue_full=%ld ESB_ok=%ld fail=%ld timeout=%ld dropped=%ld",
 			(long)atomic_get(&spi_frames),
 			(long)atomic_get(&spi_errors),
 			(long)atomic_get(&spi_duplicates),
 			(long)atomic_get(&report_queue_overruns),
 			(long)atomic_get(&esb_tx_successes),
 			(long)atomic_get(&esb_tx_failures),
-			(long)atomic_get(&esb_tx_timeouts));
+			(long)atomic_get(&esb_tx_timeouts),
+			(long)atomic_get(&esb_tx_dropped));
 	}
 }
 
@@ -349,26 +373,81 @@ int main(void)
 		LOG_ERR("SPI slave device is not ready");
 		return -ENODEV;
 	}
+	atomic_set(&last_spi_activity_uptime_ms, (atomic_val_t)k_uptime_get_32());
 	k_sem_give(&esb_started);
 
 	for (;;) {
-		k_sem_take(&poweroff_requested, K_FOREVER);
+		int ret = k_sem_take(&poweroff_requested, K_SECONDS(1));
+		if (ret != 0) {
+			/* No explicit poweroff requested: check fallback idle timeout (5 minutes) */
+			uint32_t now = k_uptime_get_32();
+			uint32_t last = (uint32_t)atomic_get(&last_spi_activity_uptime_ms);
+			if ((now - last) >= FALLBACK_IDLE_TIMEOUT_MS) {
+				LOG_INF("Fallback idle timeout expired (%u ms without SPI activity); entering System OFF",
+					FALLBACK_IDLE_TIMEOUT_MS);
+				atomic_set(&poweroff_pending, 1);
+			} else {
+				continue;
+			}
+		}
+
 		if (atomic_get(&poweroff_pending) == 0) {
 			continue;
 		}
 
 		/* Give RP2040's same-sequence SPI safety copy time to complete, then
-		 * wait only for already-accepted urgent ESB traffic. */
+		 * wait only for already-accepted urgent ESB traffic up to POWEROFF_DRAIN_TIMEOUT_MS. */
 		k_sleep(K_MSEC(2));
-		while (k_msgq_num_used_get(&report_queue) != 0U ||
-		       atomic_get(&radio_frame_in_flight) != 0) {
+		int64_t drain_start = k_uptime_get();
+		while ((k_msgq_num_used_get(&report_queue) != 0U ||
+		        atomic_get(&radio_frame_in_flight) != 0) &&
+		       (k_uptime_get() - drain_start < (int64_t)POWEROFF_DRAIN_TIMEOUT_MS)) {
 			k_sleep(K_MSEC(1));
 		}
 
+		/* If timeout hit, force purge queue and clear in-flight flag to prevent deadlock */
+		if (k_msgq_num_used_get(&report_queue) != 0U ||
+		    atomic_get(&radio_frame_in_flight) != 0) {
+			LOG_WRN("Poweroff drain timeout (%u ms) expired; purging queue and forcing radio release",
+				POWEROFF_DRAIN_TIMEOUT_MS);
+			k_msgq_purge(&report_queue);
+			atomic_set(&radio_frame_in_flight, 0);
+		}
+
+		/* Check CSN pin (P0.22) state before arming SENSE_LOW to prevent instant wake-up loop.
+		 * If RP2040 is holding CSN LOW, wait up to CSN_SETTLE_TIMEOUT_MS for it to return HIGH. */
+		nrf_gpio_cfg_input(SPI_CSN_PIN, NRF_GPIO_PIN_PULLUP);
+		uint32_t csn_wait_ms = 0;
+		while (nrf_gpio_pin_read(SPI_CSN_PIN) == 0) {
+			k_sleep(K_MSEC(1));
+			csn_wait_ms++;
+			if (csn_wait_ms >= CSN_SETTLE_TIMEOUT_MS) {
+				LOG_WRN("CSN (P0.22) held LOW for >%u ms; aborting poweroff to prevent wake loop",
+					CSN_SETTLE_TIMEOUT_MS);
+				break;
+			}
+		}
+
+		if (nrf_gpio_pin_read(SPI_CSN_PIN) == 0) {
+			LOG_ERR("CSN pin still LOW; cancelling poweroff");
+			atomic_set(&poweroff_pending, 0);
+			continue;
+		}
+
 		esb_disable();
-		nrf_gpio_cfg_sense_input(NRF_GPIO_PIN_MAP(0, 22),
+
+		/* Final verification of CSN level prior to entering System OFF */
+		if (nrf_gpio_pin_read(SPI_CSN_PIN) == 0) {
+			LOG_WRN("CSN went LOW immediately before poweroff; re-enabling ESB");
+			atomic_set(&poweroff_pending, 0);
+			esb_initialize();
+			continue;
+		}
+
+		nrf_gpio_cfg_sense_input(SPI_CSN_PIN,
 					 NRF_GPIO_PIN_PULLUP,
 					 NRF_GPIO_PIN_SENSE_LOW);
+		LOG_INF("Transmitter entering System OFF (sense wake on CSN LOW)");
 		sys_poweroff();
 	}
 }
