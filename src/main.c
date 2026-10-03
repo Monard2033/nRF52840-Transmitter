@@ -38,6 +38,12 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_ACK_MAGIC       0x5AU
 #define LINK_ACK_TYPE_DFU    0x02U
 #define LINK_RF_CHANNEL      90U
+/* DFU OTA command range (0x10..0x1F). DFU frames are strictly ordered,
+ * opaque protocol data owned by the RP2040 DFU handler; the RP2040 already
+ * replays the stored reply for redelivered commands, so suppressing a
+ * repeated DFU frame here would silently corrupt the OTA staging stream. */
+#define LINK_TYPE_DFU_FIRST  0x10U
+#define LINK_TYPE_DFU_LAST   0x1FU
 #define REPORT_QUEUE_DEPTH   256U
 #define ESB_EVENT_TIMEOUT_US 15000U
 #define RETRY_BACKOFF_US     50U
@@ -269,8 +275,21 @@ static void spi_slave_thread(void)
 			continue;
 		}
 
-		if (spi_rx.type != LINK_TYPE_DFU_STATUS &&
-		    last_spi_frame_valid &&
+		/* DFU commands are never suppressed: the RP2040 DFU handler owns
+		 * all replay/duplicate policy for the OTA stream. */
+		if (spi_rx.type >= LINK_TYPE_DFU_FIRST &&
+		    spi_rx.type <= LINK_TYPE_DFU_LAST) {
+			if (k_msgq_put(&report_queue, &spi_rx, K_NO_WAIT) != 0) {
+				atomic_inc(&report_queue_overruns);
+				continue;
+			}
+			memcpy(&last_spi_frame, &spi_rx, sizeof(spi_rx));
+			last_spi_frame_valid = true;
+			atomic_inc(&spi_frames);
+			continue;
+		}
+
+		if (last_spi_frame_valid &&
 		    memcmp(&spi_rx, &last_spi_frame, sizeof(spi_rx)) == 0) {
 			/* RP2040 safety copy with the same sequence: suppress
 			 * before ESB; HID semantics remain untouched. */
