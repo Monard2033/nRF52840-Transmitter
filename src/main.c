@@ -31,8 +31,6 @@ LOG_MODULE_REGISTER(transmitter, LOG_LEVEL_INF);
 #define LINK_MAGIC           0xA5U
 #define LINK_VERSION         0x03U
 #define LINK_FRAME_SIZE      12U
-#define LINK_TYPE_KEYBOARD   0x01U
-#define LINK_TYPE_CONSUMER   0x02U
 #define LINK_TYPE_CONTROL    0x03U
 #define LINK_TYPE_DFU_STATUS 0x13U
 #define LINK_CONTROL_SYSTEM_OFF 0x01U
@@ -298,16 +296,7 @@ static void spi_slave_thread(void)
 			continue;
 		}
 
-		/* Only real user activity (keyboard, consumer) or active DFU resets the fallback idle timeout.
-		 * Internal SPI polling or control traffic must not postpone System OFF. */
-		bool const is_user_activity = (spi_rx.type == LINK_TYPE_KEYBOARD) ||
-					      (spi_rx.type == LINK_TYPE_CONSUMER) ||
-					      (spi_rx.type >= LINK_TYPE_DFU_FIRST &&
-					       spi_rx.type <= LINK_TYPE_DFU_LAST);
-
-		if (is_user_activity) {
-			atomic_set(&last_spi_activity_uptime_ms, (atomic_val_t)k_uptime_get_32());
-		}
+		atomic_set(&last_spi_activity_uptime_ms, (atomic_val_t)k_uptime_get_32());
 
 		/* DFU commands are never suppressed: the RP2040 DFU handler owns
 		 * all replay/duplicate policy for the OTA stream. */
@@ -331,23 +320,14 @@ static void spi_slave_thread(void)
 			continue;
 		}
 
-		if (spi_rx.type == LINK_TYPE_CONTROL) {
-			if (spi_rx.data[0] == LINK_CONTROL_SYSTEM_OFF) {
-				memcpy(&last_spi_frame, &spi_rx, sizeof(spi_rx));
-				last_spi_frame_valid = true;
-				atomic_inc(&spi_frames);
-				atomic_set(&poweroff_pending, 1);
-				k_sem_give(&poweroff_requested);
-				continue;
-			}
-			if (spi_rx.data[0] == LINK_CONTROL_POLL_ACK) {
-				/* SPI-local poll: clock reverse ACK snapshot to RP2040,
-				 * do not forward over radio ESB and do not reset idle timer. */
-				memcpy(&last_spi_frame, &spi_rx, sizeof(spi_rx));
-				last_spi_frame_valid = true;
-				atomic_inc(&spi_frames);
-				continue;
-			}
+		if (spi_rx.type == LINK_TYPE_CONTROL &&
+		    spi_rx.data[0] == LINK_CONTROL_SYSTEM_OFF) {
+			memcpy(&last_spi_frame, &spi_rx, sizeof(spi_rx));
+			last_spi_frame_valid = true;
+			atomic_inc(&spi_frames);
+			atomic_set(&poweroff_pending, 1);
+			k_sem_give(&poweroff_requested);
+			continue;
 		}
 
 		if (k_msgq_put(&report_queue, &spi_rx, K_NO_WAIT) != 0) {
